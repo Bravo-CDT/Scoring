@@ -2547,7 +2547,7 @@ admin:
 services:
   - name: svc1
     host: 127.0.0.1
-    check_type: fast
+    check_type: tcp_connect
     interval_seconds: 1
     points_per_failure: 10
     params: {}
@@ -2556,7 +2556,7 @@ services:
 func TestScheduler_StartTicksRepeatedly(t *testing.T) {
 	path := writeTempConfig(t, baseYAML)
 	registry := checks.NewRegistry()
-	registry.Register("fast", func(ctx context.Context, host string, params map[string]any) checks.Result {
+	registry.Register("tcp_connect", func(ctx context.Context, host string, params map[string]any) checks.Result {
 		return checks.Result{Success: true, Detail: "ok"}
 	})
 	sink := &fakeSink{}
@@ -2576,7 +2576,7 @@ func TestScheduler_StartTicksRepeatedly(t *testing.T) {
 func TestScheduler_StopHaltsFurtherTicks(t *testing.T) {
 	path := writeTempConfig(t, baseYAML)
 	registry := checks.NewRegistry()
-	registry.Register("fast", func(ctx context.Context, host string, params map[string]any) checks.Result {
+	registry.Register("tcp_connect", func(ctx context.Context, host string, params map[string]any) checks.Result {
 		return checks.Result{Success: true}
 	})
 	sink := &fakeSink{}
@@ -2601,7 +2601,7 @@ func TestScheduler_StopHaltsFurtherTicks(t *testing.T) {
 func TestScheduler_HungCheckIsForceFailedAtDeadline(t *testing.T) {
 	path := writeTempConfig(t, baseYAML) // interval_seconds: 1
 	registry := checks.NewRegistry()
-	registry.Register("fast", func(ctx context.Context, host string, params map[string]any) checks.Result {
+	registry.Register("tcp_connect", func(ctx context.Context, host string, params map[string]any) checks.Result {
 		<-ctx.Done() // hang until the per-check deadline cancels us
 		return checks.Result{Success: false, Detail: "forced by deadline"}
 	})
@@ -2626,7 +2626,7 @@ func TestScheduler_HungCheckIsForceFailedAtDeadline(t *testing.T) {
 func TestScheduler_RestartReloadsConfig(t *testing.T) {
 	path := writeTempConfig(t, baseYAML) // points_per_failure: 10
 	registry := checks.NewRegistry()
-	registry.Register("fast", func(ctx context.Context, host string, params map[string]any) checks.Result {
+	registry.Register("tcp_connect", func(ctx context.Context, host string, params map[string]any) checks.Result {
 		return checks.Result{Success: true}
 	})
 	sink := &fakeSink{}
@@ -2645,7 +2645,7 @@ admin:
 services:
   - name: svc1
     host: 127.0.0.1
-    check_type: fast
+    check_type: tcp_connect
     interval_seconds: 1
     points_per_failure: 99
     params: {}
@@ -3717,7 +3717,7 @@ admin:
 services:
   - name: svc1
     host: 127.0.0.1
-    check_type: fast
+    check_type: tcp_connect
     interval_seconds: 1
     points_per_failure: 10
     params: {}
@@ -3732,7 +3732,7 @@ admin:
 services:
   - name: svc2
     host: 127.0.0.1
-    check_type: fast
+    check_type: tcp_connect
     interval_seconds: 1
     points_per_failure: 10
     params: {}
@@ -3760,7 +3760,7 @@ func setup(t *testing.T, yaml string) (*Engine, *store.Store, string) {
 	}
 
 	registry := checks.NewRegistry()
-	registry.Register("fast", func(ctx context.Context, host string, params map[string]any) checks.Result {
+	registry.Register("tcp_connect", func(ctx context.Context, host string, params map[string]any) checks.Result {
 		return checks.Result{Success: true}
 	})
 	sched := scheduler.New(registry, noopSink{}, configPath)
@@ -4449,7 +4449,7 @@ func setupAPI(t *testing.T, yaml string) (baseURL string, st *store.Store, confi
 	}
 
 	registry := checks.NewRegistry()
-	registry.Register("fast", func(ctx context.Context, host string, params map[string]any) checks.Result {
+	registry.Register("tcp_connect", func(ctx context.Context, host string, params map[string]any) checks.Result {
 		return checks.Result{Success: true}
 	})
 	sched := scheduler.New(registry, noopSink{}, configPath)
@@ -4478,7 +4478,7 @@ admin:
 services:
   - name: svc1
     host: 127.0.0.1
-    check_type: fast
+    check_type: tcp_connect
     interval_seconds: 1
     points_per_failure: 10
     params: {}
@@ -4633,7 +4633,7 @@ admin:
 services:
   - name: svc2
     host: 127.0.0.1
-    check_type: fast
+    check_type: tcp_connect
     interval_seconds: 1
     points_per_failure: 10
     params: {}
@@ -5104,7 +5104,7 @@ func buildStack(t *testing.T, dbPath, configPath string) stack {
 
 	sc := scorer.New(st, sess.ID, cfg.MassFailureFraction)
 	registry := checks.NewRegistry()
-	registry.Register("always_fail", func(ctx context.Context, host string, params map[string]any) checks.Result {
+	registry.Register("tcp_connect", func(ctx context.Context, host string, params map[string]any) checks.Result {
 		return checks.Result{Success: false, Detail: "simulated down"}
 	})
 	sched := scheduler.New(registry, sc, configPath)
@@ -5166,7 +5166,7 @@ admin:
 services:
   - name: svc1
     host: 127.0.0.1
-    check_type: always_fail
+    check_type: tcp_connect
     interval_seconds: 1
     points_per_failure: 10
     params: {}
