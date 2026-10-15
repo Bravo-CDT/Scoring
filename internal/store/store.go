@@ -157,12 +157,16 @@ func Open(path string) (*Store, error) {
 //     is being written.
 //   - busy_timeout waits out a lock instead of failing the statement, which
 //     covers the WAL checkpointer and anything else touching the file.
+//   - foreign_keys turns the schema's REFERENCES clauses into real enforcement
+//     (SQLite ignores them otherwise), so an insert carrying a wrong or stale
+//     session_id or service_id fails immediately instead of leaving an orphan
+//     row that quietly drops out of every scoring query.
 func dsn(path string) string {
 	u := url.URL{
 		Scheme: "file",
 		Opaque: (&url.URL{Path: path}).EscapedPath(),
 		RawQuery: url.Values{
-			"_pragma": {"journal_mode(WAL)", "busy_timeout(5000)"},
+			"_pragma": {"journal_mode(WAL)", "busy_timeout(5000)", "foreign_keys(ON)"},
 		}.Encode(),
 	}
 	return u.String()

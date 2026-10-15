@@ -91,6 +91,34 @@ func TestOpen_UsesSingleConnection(t *testing.T) {
 	}
 }
 
+func TestOpen_EnforcesForeignKeys(t *testing.T) {
+	st := openTemp(t)
+
+	var foreignKeys bool
+	if err := st.db.QueryRow("PRAGMA foreign_keys").Scan(&foreignKeys); err != nil {
+		t.Fatalf("PRAGMA foreign_keys: %v", err)
+	}
+	if !foreignKeys {
+		t.Error("foreign_keys = off, want on")
+	}
+
+	// SQLite ignores REFERENCES clauses unless the pragma is on, so prove
+	// enforcement with a real dangling reference: a check result for a service
+	// that does not exist must be rejected rather than silently stored.
+	sess, err := st.GetOrCreateSession("comp-1", 1000)
+	if err != nil {
+		t.Fatalf("GetOrCreateSession: %v", err)
+	}
+	_, err = st.db.Exec(
+		`INSERT INTO check_results (session_id, service_id, timestamp, success, latency_ms, detail)
+		 VALUES (?, ?, 0, 1, 0, '')`,
+		sess.ID, 424242,
+	)
+	if err == nil {
+		t.Error("inserting a check result for a nonexistent service succeeded, want foreign-key violation")
+	}
+}
+
 func TestOpen_SetsWALAndBusyTimeout(t *testing.T) {
 	st := openTemp(t)
 
