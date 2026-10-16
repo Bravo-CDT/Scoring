@@ -77,7 +77,18 @@ const checkResultColumns = `id, session_id, service_id, timestamp, success, late
 // precise, so the id is needed as a tiebreaker: without it two checks that
 // finished in the same millisecond could swap places between two pages of the
 // same listing and a row would be shown twice or skipped.
+//
+// It is for listings only. "Which result is a service's latest" is answered by
+// lastInserted instead, because a backward clock step would make timestamp
+// order disagree with what actually happened.
 const newestFirst = `ORDER BY timestamp DESC, id DESC`
+
+// lastInserted orders one service's results by causal order for the "latest" /
+// "most recent" queries. Each service has a single routine that records its
+// results one at a time, so the AUTOINCREMENT id is the order they happened
+// in, whatever the engine's clock said (an NTP correction or VM resume can step
+// it backwards).
+const lastInserted = `ORDER BY id DESC`
 
 // scanCheckResult reads one checkResultColumns row. Its error is returned
 // unwrapped so callers can recognise sql.ErrNoRows.
@@ -115,14 +126,15 @@ func (s *Store) InsertCheckResult(cr CheckResult) (int64, error) {
 	return id, nil
 }
 
-// GetLatestCheckResult returns the service's most recent check result, or
-// (nil, nil) when it has none yet. A service always has that state for a
-// while — it is created from config before its first check runs — so "no
-// result yet" is an ordinary answer rather than an error.
+// GetLatestCheckResult returns the service's most recent check result (the
+// last one inserted, see lastInserted), or (nil, nil) when it has none yet. A
+// service always has that state for a while — it is created from config
+// before its first check runs — so "no result yet" is an ordinary answer
+// rather than an error.
 func (s *Store) GetLatestCheckResult(serviceID int64) (*CheckResult, error) {
 	row := s.db.QueryRow(
 		`SELECT `+checkResultColumns+` FROM check_results
-		 WHERE service_id = ? `+newestFirst+` LIMIT 1`,
+		 WHERE service_id = ? `+lastInserted+` LIMIT 1`,
 		serviceID,
 	)
 	switch cr, err := scanCheckResult(row); {
@@ -170,24 +182,19 @@ func (s *Store) ListCheckResults(serviceID int64, limit int, beforeID int64) ([]
 
 // CountConsecutiveFailures returns how many of the service's most recent check
 // results are failures in an unbroken run, meaning the number of failures
-// after its latest success (by the timestamp-then-id order of
-// GetLatestCheckResult), or all of its failures if it has never succeeded. A
-// service with no results, or whose latest result succeeded, has 0.
+// after its latest success (by the insert order of GetLatestCheckResult), or
+// all of its failures if it has never succeeded. A service with no results, or
+// whose latest result succeeded, has 0.
 //
 // It is counted in SQL rather than by walking the history newest-first, so the
 // cost does not depend on reading a long failure streak row by row.
 func (s *Store) CountConsecutiveFailures(serviceID int64) (int, error) {
 	var count int
 	err := s.db.QueryRow(
-		`WITH last_success AS (
-		     SELECT timestamp, id FROM check_results
-		     WHERE service_id = ? AND success = 1
-		     `+newestFirst+` LIMIT 1
-		 )
-		 SELECT COUNT(*) FROM check_results
+		`SELECT COUNT(*) FROM check_results
 		 WHERE service_id = ? AND success = 0
-		   AND (NOT EXISTS (SELECT 1 FROM last_success)
-		        OR (timestamp, id) > (SELECT timestamp, id FROM last_success))`,
+		   AND id > COALESCE(
+		       (SELECT MAX(id) FROM check_results WHERE service_id = ? AND success = 1), 0)`,
 		serviceID, serviceID,
 	).Scan(&count)
 	if err != nil {
@@ -198,8 +205,8 @@ func (s *Store) CountConsecutiveFailures(serviceID int64) (int, error) {
 
 // CountActiveServiceOutcomes reports how many services in the session are
 // active and how many of those are currently failing, meaning their most
-// recent check result (by the same timestamp-then-id order as
-// GetLatestCheckResult) is a failure.
+// recent check result (by the same insert order as GetLatestCheckResult) is a
+// failure.
 //
 // The denominator is every active service, including ones that have not
 // reported yet; such a service counts as not failing, because "no result yet"
@@ -211,7 +218,7 @@ func (s *Store) CountActiveServiceOutcomes(sessionID int64) (active, failing int
 		`SELECT COUNT(*), COALESCE(SUM(
 		     (SELECT cr.success = 0 FROM check_results cr
 		      WHERE cr.session_id = sv.session_id AND cr.service_id = sv.id
-		      ORDER BY cr.timestamp DESC, cr.id DESC LIMIT 1)
+		      ORDER BY cr.id DESC LIMIT 1)
 		 ), 0)
 		 FROM services sv
 		 WHERE sv.session_id = ? AND sv.active = 1`,
