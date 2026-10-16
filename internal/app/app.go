@@ -124,7 +124,7 @@ func build(opts Options, cfg *config.Config, st *store.Store) (*App, error) {
 	// store has just forced the engine stopped, so no routine starts here;
 	// per-service scoring pauses persist untouched. Config snapshots are
 	// recorded when routines start.
-	if _, _, err := eng.ReloadAs(engine.ActorSystem, opts.ConfigPath); err != nil {
+	if _, err := eng.ReloadAs(engine.ActorSystem, opts.ConfigPath); err != nil {
 		return nil, fmt.Errorf("syncing services from config: %w", err)
 	}
 	// One event per boot, so the log shows the restart and why scoring stopped

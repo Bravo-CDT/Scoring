@@ -236,9 +236,130 @@ func mustDo(t *testing.T, what string, err error) {
 	}
 }
 
+// start starts the engine, failing the test on an error or on any routine
+// that fails to start.
+func (h *harness) start(t *testing.T) {
+	t.Helper()
+	failed, err := h.e.Start()
+	mustDo(t, "Start", err)
+	if failed == nil || len(failed) != 0 {
+		t.Fatalf("Start: failed = %#v, want an empty list", failed)
+	}
+}
+
+// reloadParts splits a Reload result for tests that look only at the added
+// and removed names.
+func reloadParts(res ReloadResult, err error) (added, removed []string, _ error) {
+	return res.Added, res.Removed, err
+}
+
+// breakConfig rewrites the config so that it no longer validates (svc2 gets
+// a misspelled param), which makes every routine (re)start fail to load its
+// entry while routines already running carry on.
+func (h *harness) breakConfig(t *testing.T) {
+	t.Helper()
+	h.writeConfig(t, configWithServices(svcYAML("svc1", 10)+
+		strings.Replace(svcYAML("svc2", 10), "{port: 9}", "{prot: 9}", 1)))
+}
+
+// wantStartError checks err is a *StartError for service.
+func wantStartError(t *testing.T, err error, service string) {
+	t.Helper()
+	var se *StartError
+	if !errors.As(err, &se) || se.Service != service {
+		t.Fatalf("error = %v, want a *StartError for %s", err, service)
+	}
+	if f := se.Failure(); f.Service != service || !strings.Contains(f.Error, "prot") {
+		t.Errorf("Failure() = %+v, want %s with the config error naming prot", f, service)
+	}
+}
+
+// A restart on a broken config leaves the service enabled but stopped; Start
+// retries it and reports the failure, while svc1 keeps running untouched.
+func TestStart_ReportsRoutinesThatFailToStart(t *testing.T) {
+	h := newHarness(t, okCheck, "svc1", "svc2")
+	h.start(t)
+	h.breakConfig(t)
+
+	err := h.e.RestartService("svc2", true)
+	wantStartError(t, err, "svc2")
+	if h.running(t, "svc2") || !h.running(t, "svc1") {
+		t.Fatalf("running: svc1=%v svc2=%v, want true/false", h.running(t, "svc1"), h.running(t, "svc2"))
+	}
+	if !h.service(t, "svc2").ScoringPaused {
+		t.Error("the requested scoring pause was not applied although the restart failed")
+	}
+
+	failed, err := h.e.Start()
+	mustDo(t, "Start", err)
+	if len(failed) != 1 || failed[0].Service != "svc2" || !strings.Contains(failed[0].Error, "prot") {
+		t.Errorf("failed = %+v, want svc2 with the config error", failed)
+	}
+	if !h.running(t, "svc1") {
+		t.Error("svc1 stopped by a failing Start")
+	}
+
+	// Once the config is fixed the next Start brings svc2 back, with an
+	// empty failure list.
+	h.writeConfig(t, configYAML("svc1", "svc2"))
+	h.start(t)
+	if !h.running(t, "svc2") {
+		t.Error("svc2 not started after the config was fixed")
+	}
+}
+
+func TestStartService_StartFailureIsAStartError(t *testing.T) {
+	h := newHarness(t, okCheck, "svc1", "svc2")
+	h.start(t)
+	mustDo(t, "StopService", h.e.StopService("svc2"))
+	h.breakConfig(t)
+
+	wantStartError(t, h.e.StartService("svc2"), "svc2")
+	if h.running(t, "svc2") || !h.running(t, "svc1") {
+		t.Errorf("running: svc1=%v svc2=%v, want true/false", h.running(t, "svc1"), h.running(t, "svc2"))
+	}
+	// The enable took effect: svc2 starts with the engine once the config is
+	// fixed.
+	h.writeConfig(t, configYAML("svc1", "svc2"))
+	h.start(t)
+	if !h.running(t, "svc2") {
+		t.Error("svc2 not enabled by the failed StartService")
+	}
+}
+
+func TestReload_ReportsAddedRoutinesThatFailToStart(t *testing.T) {
+	h := newHarness(t, okCheck, "svc1")
+	h.start(t)
+	// svc3 is valid config, but the harness registry has no http check, so
+	// its routine cannot start.
+	h.writeConfig(t, configWithServices(svcYAML("svc1", 10)+`
+  - name: svc3
+    host: 127.0.0.1
+    check_type: http
+    interval_seconds: 1
+    points_per_failure: 10
+    params: {port: 80}
+`))
+
+	res, err := h.e.Reload("")
+	mustDo(t, "Reload", err)
+	if !slices.Equal(res.Added, []string{"svc3"}) || len(res.Removed) != 0 {
+		t.Fatalf("Reload = %+v, want svc3 added", res)
+	}
+	if len(res.Failed) != 1 || res.Failed[0].Service != "svc3" || !strings.Contains(res.Failed[0].Error, "http") {
+		t.Errorf("Failed = %+v, want svc3 with an error naming the check type", res.Failed)
+	}
+	if !h.running(t, "svc1") || h.running(t, "svc3") {
+		t.Errorf("running: svc1=%v svc3=%v, want true/false", h.running(t, "svc1"), h.running(t, "svc3"))
+	}
+	if !h.service(t, "svc3").Active {
+		t.Error("svc3 not added although only its start failed")
+	}
+}
+
 func TestStart_RunsActiveServicesAndLeavesScoringPaused(t *testing.T) {
 	h := newHarness(t, okCheck, "svc1", "svc2")
-	mustDo(t, "Start", h.e.Start())
+	h.start(t)
 
 	s := h.status(t)
 	if s.EngineState != store.EngineRunning {
@@ -266,8 +387,8 @@ func TestStart_RunsActiveServicesAndLeavesScoringPaused(t *testing.T) {
 
 func TestStart_IsIdempotent(t *testing.T) {
 	h := newHarness(t, okCheck, "svc1")
-	mustDo(t, "Start", h.e.Start())
-	mustDo(t, "second Start", h.e.Start())
+	h.start(t)
+	h.start(t)
 
 	if !h.running(t, "svc1") {
 		t.Error("svc1 not running")
@@ -286,7 +407,11 @@ func TestStart_OneServiceFailingDoesNotBlockOthers(t *testing.T) {
 	ghost, err := h.st.GetOrCreateService(h.sess.ID, "aaa-ghost")
 	mustDo(t, "GetOrCreateService", err)
 
-	mustDo(t, "Start", h.e.Start())
+	failed, err := h.e.Start()
+	mustDo(t, "Start", err)
+	if len(failed) != 1 || failed[0].Service != "aaa-ghost" {
+		t.Errorf("failed = %+v, want aaa-ghost reported", failed)
+	}
 
 	if !h.running(t, "svc1") {
 		t.Error("svc1 not running; one service's failure blocked the others")
@@ -305,14 +430,14 @@ func TestStart_OneServiceFailingDoesNotBlockOthers(t *testing.T) {
 
 func TestStart_RecordsConfigSnapshotPerRoutineStart(t *testing.T) {
 	h := newHarness(t, okCheck, "svc1")
-	mustDo(t, "Start", h.e.Start())
+	h.start(t)
 	if got := h.snapshotPoints(t, "svc1"); !slices.Equal(got, []int{10}) {
 		t.Fatalf("after Start: snapshots = %v, want [10]", got)
 	}
 
 	mustDo(t, "Stop", h.e.Stop())
 	h.writeConfig(t, configWithServices(svcYAML("svc1", 25)))
-	mustDo(t, "Start again", h.e.Start())
+	h.start(t)
 	if got := h.snapshotPoints(t, "svc1"); !slices.Equal(got, []int{10, 25}) {
 		t.Errorf("after restart: snapshots = %v, want [10 25]", got)
 	}
@@ -320,7 +445,7 @@ func TestStart_RecordsConfigSnapshotPerRoutineStart(t *testing.T) {
 
 func TestStop_HaltsEveryRoutine(t *testing.T) {
 	h := newHarness(t, okCheck, "svc1", "svc2")
-	mustDo(t, "Start", h.e.Start())
+	h.start(t)
 	mustDo(t, "Stop", h.e.Stop())
 
 	if ids := h.e.scheduler.RunningServiceIDs(); len(ids) != 0 {
@@ -342,14 +467,14 @@ func TestStop_HaltsEveryRoutine(t *testing.T) {
 
 func TestStopService_PersistsAcrossEngineStopStart(t *testing.T) {
 	h := newHarness(t, okCheck, "svc1", "svc2")
-	mustDo(t, "Start", h.e.Start())
+	h.start(t)
 	mustDo(t, "StopService", h.e.StopService("svc1"))
 	if h.running(t, "svc1") {
 		t.Fatal("svc1 still running after StopService")
 	}
 
 	mustDo(t, "Stop", h.e.Stop())
-	mustDo(t, "second Start", h.e.Start())
+	h.start(t)
 
 	if h.running(t, "svc1") {
 		t.Error("svc1 restarted by an engine stop/start; its per-service stop must persist")
@@ -367,7 +492,7 @@ func TestStopService_PersistsAcrossEngineStopStart(t *testing.T) {
 func TestStopService_WhileEngineStoppedIsRememberedAtStart(t *testing.T) {
 	h := newHarness(t, okCheck, "svc1")
 	mustDo(t, "StopService", h.e.StopService("svc1"))
-	mustDo(t, "Start", h.e.Start())
+	h.start(t)
 	if h.running(t, "svc1") {
 		t.Error("svc1 running; StopService before Start should keep it stopped")
 	}
@@ -375,7 +500,7 @@ func TestStopService_WhileEngineStoppedIsRememberedAtStart(t *testing.T) {
 
 func TestStartService_WhileEngineStoppedOnlyRecordsDesiredState(t *testing.T) {
 	h := newHarness(t, okCheck, "svc1")
-	mustDo(t, "Start", h.e.Start())
+	h.start(t)
 	mustDo(t, "StopService", h.e.StopService("svc1"))
 	mustDo(t, "Stop", h.e.Stop())
 
@@ -384,7 +509,7 @@ func TestStartService_WhileEngineStoppedOnlyRecordsDesiredState(t *testing.T) {
 		t.Fatal("StartService started a routine while the engine is stopped")
 	}
 
-	mustDo(t, "Start", h.e.Start())
+	h.start(t)
 	if !h.running(t, "svc1") {
 		t.Error("svc1 not running after engine Start, despite StartService")
 	}
@@ -392,7 +517,7 @@ func TestStartService_WhileEngineStoppedOnlyRecordsDesiredState(t *testing.T) {
 
 func TestStartService_WhileRunningStartsRoutine(t *testing.T) {
 	h := newHarness(t, okCheck, "svc1")
-	mustDo(t, "Start", h.e.Start())
+	h.start(t)
 	mustDo(t, "StopService", h.e.StopService("svc1"))
 	mustDo(t, "StartService", h.e.StartService("svc1"))
 
@@ -410,7 +535,7 @@ func TestStartService_WhileRunningStartsRoutine(t *testing.T) {
 
 func TestStartService_ConfigErrorIsReturned(t *testing.T) {
 	h := newHarness(t, okCheck, "svc1", "svc2")
-	mustDo(t, "Start", h.e.Start())
+	h.start(t)
 	mustDo(t, "StopService", h.e.StopService("svc2"))
 	// svc2 vanishes from config.yaml without a reload.
 	h.writeConfig(t, configYAML("svc1"))
@@ -425,7 +550,7 @@ func TestStartService_ConfigErrorIsReturned(t *testing.T) {
 
 func TestRestartService_RereadsConfig(t *testing.T) {
 	h := newHarness(t, okCheck, "svc1")
-	mustDo(t, "Start", h.e.Start())
+	h.start(t)
 	h.writeConfig(t, configWithServices(svcYAML("svc1", 40)))
 
 	mustDo(t, "RestartService", h.e.RestartService("svc1", false))
@@ -463,7 +588,7 @@ func TestRestartService_WithPauseScoring_IsAtomic(t *testing.T) {
 	// Leave svc1's routine stopped so the restart launches a fresh routine
 	// whose first check runs immediately: the pause must already be stored.
 	mustDo(t, "StopService", h.e.StopService("svc1"))
-	mustDo(t, "Start", h.e.Start())
+	h.start(t)
 
 	mustDo(t, "RestartService", h.e.RestartService("svc1", true))
 	if !h.service(t, "svc1").ScoringPaused {
@@ -498,7 +623,7 @@ func TestRestartService_WhileEngineStoppedPausesWithoutStarting(t *testing.T) {
 		t.Error("pause not persisted by RestartService while the engine is stopped")
 	}
 	// Restart re-enables the service, so it runs once the engine starts.
-	mustDo(t, "Start", h.e.Start())
+	h.start(t)
 	if !h.running(t, "svc1") {
 		t.Error("svc1 not running after Start, despite RestartService enabling it")
 	}
@@ -567,7 +692,7 @@ func TestScoringPausesNotBlockedByStuckControlOp(t *testing.T) {
 	// Runs before the harness's e.Stop cleanup, which would otherwise hang.
 	t.Cleanup(unblock)
 
-	mustDo(t, "Start", h.e.Start())
+	h.start(t)
 	select {
 	case <-inCheck:
 	case <-time.After(waitTimeout):
@@ -621,7 +746,7 @@ func TestScoringPausesNotBlockedByStuckControlOp(t *testing.T) {
 
 func TestFailuresScoreOnlyAfterResumeScoring(t *testing.T) {
 	h := newHarness(t, failCheck, "svc1")
-	mustDo(t, "Start", h.e.Start())
+	h.start(t)
 
 	waitFor(t, "a recorded check", func() bool { return h.countResults(t, "svc1") >= 1 })
 	if s := h.status(t); s.BlueScore != 1000 || s.RedScore != 0 {
@@ -663,10 +788,10 @@ func TestPerServiceMethods_UnknownNameIsErrServiceNotFound(t *testing.T) {
 
 func TestReload_AddsAndRemovesServicesWhileRunning(t *testing.T) {
 	h := newHarness(t, okCheck, "svc1", "svc2")
-	mustDo(t, "Start", h.e.Start())
+	h.start(t)
 
 	h.writeConfig(t, configYAML("svc2", "svc3"))
-	added, removed, err := h.e.Reload(h.configPath)
+	added, removed, err := reloadParts(h.e.Reload(h.configPath))
 	mustDo(t, "Reload", err)
 
 	if !slices.Equal(added, []string{"svc3"}) {
@@ -715,7 +840,7 @@ func TestReload_WhileStoppedStartsNothingAndLeavesRunState(t *testing.T) {
 	h := newHarness(t, okCheck, "svc1")
 	h.writeConfig(t, configYAML("svc1", "svc2"))
 
-	added, _, err := h.e.Reload(h.configPath)
+	added, _, err := reloadParts(h.e.Reload(h.configPath))
 	mustDo(t, "Reload", err)
 	if !slices.Equal(added, []string{"svc2"}) {
 		t.Errorf("added = %v, want [svc2]", added)
@@ -728,7 +853,7 @@ func TestReload_WhileStoppedStartsNothingAndLeavesRunState(t *testing.T) {
 		t.Errorf("run state = %q/paused=%v, want stopped/paused untouched", s.EngineState, s.ScoringPaused)
 	}
 
-	mustDo(t, "Start", h.e.Start())
+	h.start(t)
 	if !h.running(t, "svc2") {
 		t.Error("svc2 added while stopped did not start with the engine")
 	}
@@ -742,14 +867,14 @@ func TestReload_ReactivatesRemovedServiceWithHistory(t *testing.T) {
 	mustDo(t, "PauseServiceScoring", h.e.PauseServiceScoring("svc1"))
 
 	h.writeConfig(t, configYAML())
-	_, removed, err := h.e.Reload(h.configPath)
+	_, removed, err := reloadParts(h.e.Reload(h.configPath))
 	mustDo(t, "first Reload", err)
 	if !slices.Equal(removed, []string{"svc1"}) {
 		t.Fatalf("removed = %v, want [svc1]", removed)
 	}
 
 	h.writeConfig(t, configYAML("svc1"))
-	added, _, err := h.e.Reload(h.configPath)
+	added, _, err := reloadParts(h.e.Reload(h.configPath))
 	mustDo(t, "second Reload", err)
 	if !slices.Equal(added, []string{"svc1"}) {
 		t.Fatalf("added = %v, want [svc1]", added)
@@ -769,10 +894,10 @@ func TestReload_ReactivatesRemovedServiceWithHistory(t *testing.T) {
 
 func TestReload_InvalidConfigChangesNothing(t *testing.T) {
 	h := newHarness(t, okCheck, "svc1")
-	mustDo(t, "Start", h.e.Start())
+	h.start(t)
 	h.writeConfig(t, "services: [not valid")
 
-	if _, _, err := h.e.Reload(h.configPath); err == nil {
+	if _, _, err := reloadParts(h.e.Reload(h.configPath)); err == nil {
 		t.Fatal("Reload of an invalid config succeeded")
 	}
 	if svc := h.service(t, "svc1"); !svc.Active || !h.running(t, "svc1") {
@@ -786,7 +911,7 @@ func TestReloadAs_SystemAttributesEveryEvent(t *testing.T) {
 	h := newHarness(t, okCheck, "svc1")
 	h.writeConfig(t, configYAML("svc2"))
 
-	added, removed, err := h.e.ReloadAs(ActorSystem, "")
+	added, removed, err := reloadParts(h.e.ReloadAs(ActorSystem, ""))
 	mustDo(t, "ReloadAs", err)
 	if !slices.Equal(added, []string{"svc2"}) || !slices.Equal(removed, []string{"svc1"}) {
 		t.Fatalf("added=%v removed=%v, want [svc2] and [svc1]", added, removed)
@@ -803,7 +928,7 @@ func TestReloadAs_SystemAttributesEveryEvent(t *testing.T) {
 func TestReload_ConfigReloadedEventOnlyWhenWorthLogging(t *testing.T) {
 	h := newHarness(t, okCheck, "svc1")
 
-	_, _, err := h.e.ReloadAs(ActorSystem, "")
+	_, _, err := reloadParts(h.e.ReloadAs(ActorSystem, ""))
 	mustDo(t, "ReloadAs(system)", err)
 	for _, ev := range h.events(t) {
 		if ev.Type == EventConfigReloaded {
@@ -811,7 +936,7 @@ func TestReload_ConfigReloadedEventOnlyWhenWorthLogging(t *testing.T) {
 		}
 	}
 
-	_, _, err = h.e.Reload("")
+	_, _, err = reloadParts(h.e.Reload(""))
 	mustDo(t, "Reload", err)
 	if ev := h.lastEvent(t, EventConfigReloaded); ev.Actor != "admin" {
 		t.Errorf("config_reloaded actor = %q, want admin", ev.Actor)
@@ -820,7 +945,7 @@ func TestReload_ConfigReloadedEventOnlyWhenWorthLogging(t *testing.T) {
 
 func TestStopAs_SystemAttributesEngineStopped(t *testing.T) {
 	h := newHarness(t, okCheck, "svc1")
-	mustDo(t, "Start", h.e.Start())
+	h.start(t)
 
 	mustDo(t, "StopAs", h.e.StopAs(ActorSystem))
 	if h.running(t, "svc1") {
@@ -833,7 +958,7 @@ func TestStopAs_SystemAttributesEngineStopped(t *testing.T) {
 
 func TestReload_NoChangesReturnsEmptySlices(t *testing.T) {
 	h := newHarness(t, okCheck, "svc1")
-	added, removed, err := h.e.Reload(h.configPath)
+	added, removed, err := reloadParts(h.e.Reload(h.configPath))
 	mustDo(t, "Reload", err)
 	if added == nil || removed == nil || len(added) != 0 || len(removed) != 0 {
 		t.Errorf("added=%#v removed=%#v, want empty non-nil slices", added, removed)
@@ -914,12 +1039,12 @@ func TestStatus_NoServicesIsEmptyList(t *testing.T) {
 func TestConcurrentControlOperations(t *testing.T) {
 	h := newHarness(t, okCheck, "svc1", "svc2")
 	ops := []func() error{
-		h.e.Start,
+		func() error { _, err := h.e.Start(); return err },
 		h.e.Stop,
 		func() error { return h.e.StartService("svc1") },
 		func() error { return h.e.StopService("svc1") },
 		func() error { return h.e.RestartService("svc2", false) },
-		func() error { _, _, err := h.e.Reload(h.configPath); return err },
+		func() error { _, _, err := reloadParts(h.e.Reload(h.configPath)); return err },
 		func() error { _, err := h.e.Status(); return err },
 	}
 	var wg sync.WaitGroup
