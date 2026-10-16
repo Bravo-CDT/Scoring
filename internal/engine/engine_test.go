@@ -780,6 +780,57 @@ func TestReload_InvalidConfigChangesNothing(t *testing.T) {
 	}
 }
 
+// The app's startup sync and shutdown stop are automatic, not an admin's
+// doing, so their events must say so.
+func TestReloadAs_SystemAttributesEveryEvent(t *testing.T) {
+	h := newHarness(t, okCheck, "svc1")
+	h.writeConfig(t, configYAML("svc2"))
+
+	added, removed, err := h.e.ReloadAs(ActorSystem, "")
+	mustDo(t, "ReloadAs", err)
+	if !slices.Equal(added, []string{"svc2"}) || !slices.Equal(removed, []string{"svc1"}) {
+		t.Fatalf("added=%v removed=%v, want [svc2] and [svc1]", added, removed)
+	}
+	for _, typ := range []string{EventServiceAdded, EventServiceRemoved, EventConfigReloaded} {
+		if ev := h.lastEvent(t, typ); ev.Actor != "system" {
+			t.Errorf("%s actor = %q, want system", typ, ev.Actor)
+		}
+	}
+}
+
+// An automatic reload that changes nothing (every ordinary boot) is not worth
+// an event; an admin's reload is an admin action and is always logged.
+func TestReload_ConfigReloadedEventOnlyWhenWorthLogging(t *testing.T) {
+	h := newHarness(t, okCheck, "svc1")
+
+	_, _, err := h.e.ReloadAs(ActorSystem, "")
+	mustDo(t, "ReloadAs(system)", err)
+	for _, ev := range h.events(t) {
+		if ev.Type == EventConfigReloaded {
+			t.Fatalf("system reload with no changes logged %+v", ev)
+		}
+	}
+
+	_, _, err = h.e.Reload("")
+	mustDo(t, "Reload", err)
+	if ev := h.lastEvent(t, EventConfigReloaded); ev.Actor != "admin" {
+		t.Errorf("config_reloaded actor = %q, want admin", ev.Actor)
+	}
+}
+
+func TestStopAs_SystemAttributesEngineStopped(t *testing.T) {
+	h := newHarness(t, okCheck, "svc1")
+	mustDo(t, "Start", h.e.Start())
+
+	mustDo(t, "StopAs", h.e.StopAs(ActorSystem))
+	if h.running(t, "svc1") {
+		t.Error("svc1 still running after StopAs")
+	}
+	if ev := h.lastEvent(t, EventEngineStopped); ev.Actor != "system" {
+		t.Errorf("engine_stopped actor = %q, want system", ev.Actor)
+	}
+}
+
 func TestReload_NoChangesReturnsEmptySlices(t *testing.T) {
 	h := newHarness(t, okCheck, "svc1")
 	added, removed, err := h.e.Reload(h.configPath)

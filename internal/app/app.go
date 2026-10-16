@@ -24,6 +24,9 @@ import (
 	"github.com/Bravo-CDT/Scoring/internal/store"
 )
 
+// EventProcessStarted is the event New writes once per boot.
+const EventProcessStarted = "process_started"
+
 // Options configures New. ConfigPath and DBPath are required; the rest are
 // overrides for tests and default to production behavior.
 type Options struct {
@@ -117,11 +120,26 @@ func build(opts Options, cfg *config.Config, st *store.Store) (*App, error) {
 	// Sync the session's services with the config through the same path as
 	// /reload: services new to the file are created (or reactivated with their
 	// history), services dropped from it since the last run are retired, and
-	// each change is logged as an event. The store has just forced the engine
-	// stopped, so no routine starts here; per-service scoring pauses persist
-	// untouched. Config snapshots are recorded when routines start.
-	if _, _, err := eng.Reload(opts.ConfigPath); err != nil {
+	// each change is logged as an event by the system, not an admin. The
+	// store has just forced the engine stopped, so no routine starts here;
+	// per-service scoring pauses persist untouched. Config snapshots are
+	// recorded when routines start.
+	if _, _, err := eng.ReloadAs(engine.ActorSystem, opts.ConfigPath); err != nil {
 		return nil, fmt.Errorf("syncing services from config: %w", err)
+	}
+	// One event per boot, so the log shows the restart and why scoring stopped
+	// moving: whatever state the previous process left, this one comes up
+	// stopped and paused.
+	err = st.InsertEvent(store.Event{
+		SessionID: sess.ID,
+		Level:     "info",
+		Actor:     string(engine.ActorSystem),
+		Type:      EventProcessStarted,
+		Message: fmt.Sprintf("scoring engine process started for session %q; engine stopped and scoring paused until an admin starts and resumes them",
+			sess.Name),
+	})
+	if err != nil {
+		return nil, fmt.Errorf("recording process start: %w", err)
 	}
 
 	au := auth.New(cfg.Admin.Username, cfg.Admin.PasswordHash)
@@ -139,11 +157,11 @@ func build(opts Options, cfg *config.Config, st *store.Store) (*App, error) {
 // the store. Call it only after the HTTP server has stopped handling requests.
 //
 // Stopping the engine here persists engine_state=stopped and logs an
-// engine_stopped event if it was running; the store would force the same state
-// on the next start anyway, so this just makes the shutdown explicit in the
-// event history.
+// engine_stopped event, attributed to the system, if it was running; the store
+// would force the same state on the next start anyway, so this just makes the
+// shutdown explicit in the event history.
 func (a *App) Close() error {
-	stopErr := a.Engine.Stop()
+	stopErr := a.Engine.StopAs(engine.ActorSystem)
 	if stopErr != nil {
 		stopErr = fmt.Errorf("stopping engine: %w", stopErr)
 	}

@@ -47,10 +47,15 @@ const (
 	EventConfigSnapshotFailed  = "config_snapshot_failed"
 )
 
-// Event actors.
+// Actor is who an event attributes an operation to.
+type Actor string
+
+// Event actors. The exported control methods act for ActorAdmin; the app's
+// own automatic operations (the startup config sync, the shutdown stop) use
+// the ...As variants with ActorSystem.
 const (
-	actorAdmin  = "admin"
-	actorSystem = "system"
+	ActorAdmin  Actor = "admin"
+	ActorSystem Actor = "system"
 )
 
 // Engine is the control plane for one session. It is safe for concurrent use.
@@ -128,12 +133,19 @@ func (e *Engine) Start() error {
 	if rs.EngineState == store.EngineRunning {
 		return nil
 	}
-	return e.logEngineEvent(EventEngineStarted, "engine started")
+	return e.logEngineEvent(ActorAdmin, EventEngineStarted, "engine started")
 }
 
 // Stop marks the engine stopped and stops every routine, waiting for each to
-// exit. Admins' per-service choices are kept for the next Start.
+// exit. Admins' per-service choices are kept for the next Start. It acts for
+// an admin; see StopAs.
 func (e *Engine) Stop() error {
+	return e.StopAs(ActorAdmin)
+}
+
+// StopAs is Stop with its engine_stopped event attributed to actor, so a
+// shutdown the process performs itself is not logged as an admin's action.
+func (e *Engine) StopAs(actor Actor) error {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 
@@ -151,7 +163,7 @@ func (e *Engine) Stop() error {
 	if rs.EngineState == store.EngineStopped {
 		return nil
 	}
-	return e.logEngineEvent(EventEngineStopped, "engine stopped")
+	return e.logEngineEvent(actor, EventEngineStopped, "engine stopped")
 }
 
 // PauseScoring globally stops results moving points. Checks keep running and
@@ -176,7 +188,7 @@ func (e *Engine) setGlobalScoringPaused(paused bool, eventType, message string) 
 	if err := e.store.SetGlobalScoringPaused(paused); err != nil {
 		return fmt.Errorf("engine: %s: %w", message, err)
 	}
-	return e.logEngineEvent(eventType, message)
+	return e.logEngineEvent(ActorAdmin, eventType, message)
 }
 
 // StartService enables the named service's routine and, if the engine is
@@ -197,13 +209,13 @@ func (e *Engine) StartService(name string) error {
 		return err
 	}
 	if !running {
-		return e.logServiceEvent(svc, EventRoutineStarted,
+		return e.logServiceEvent(ActorAdmin, svc, EventRoutineStarted,
 			svc.Name+" routine enabled; it starts when the engine starts")
 	}
 	if err := e.startRoutine(svc); err != nil {
 		return err
 	}
-	return e.logServiceEvent(svc, EventRoutineStarted, svc.Name+" routine started")
+	return e.logServiceEvent(ActorAdmin, svc, EventRoutineStarted, svc.Name+" routine started")
 }
 
 // StopService disables the named service's routine and stops it, waiting for
@@ -219,7 +231,7 @@ func (e *Engine) StopService(name string) error {
 	}
 	e.desiredEnabled[svc.ID] = false
 	e.scheduler.StopService(svc.ID)
-	return e.logServiceEvent(svc, EventRoutineStopped, svc.Name+" routine stopped")
+	return e.logServiceEvent(ActorAdmin, svc, EventRoutineStopped, svc.Name+" routine stopped")
 }
 
 // RestartService enables the named service's routine and, if the engine is
@@ -243,7 +255,7 @@ func (e *Engine) RestartService(name string, pauseScoring bool) error {
 		if err := e.store.SetServiceScoringPaused(svc.ID, true); err != nil {
 			return fmt.Errorf("engine: pausing scoring of %s: %w", svc.Name, err)
 		}
-		if err := e.logServiceEvent(svc, EventServiceScoringPaused,
+		if err := e.logServiceEvent(ActorAdmin, svc, EventServiceScoringPaused,
 			svc.Name+" scoring paused for routine restart"); err != nil {
 			return err
 		}
@@ -255,15 +267,15 @@ func (e *Engine) RestartService(name string, pauseScoring bool) error {
 		return err
 	}
 	if !running {
-		return e.logServiceEvent(svc, EventRoutineRestarted,
+		return e.logServiceEvent(ActorAdmin, svc, EventRoutineRestarted,
 			svc.Name+" routine enabled; it starts when the engine starts")
 	}
 	if err := e.scheduler.RestartService(svc.ID, svc.Name); err != nil {
-		e.logStartFailure(svc, actorAdmin, err)
+		e.logStartFailure(svc, ActorAdmin, err)
 		return fmt.Errorf("engine: restarting %s: %w", svc.Name, err)
 	}
 	e.snapshotConfig(svc)
-	return e.logServiceEvent(svc, EventRoutineRestarted, svc.Name+" routine restarted with reloaded config")
+	return e.logServiceEvent(ActorAdmin, svc, EventRoutineRestarted, svc.Name+" routine restarted with reloaded config")
 }
 
 // PauseServiceScoring stops the named service's results moving points. Its
@@ -293,7 +305,7 @@ func (e *Engine) setServiceScoringPaused(name string, paused bool, eventType, wh
 	if err := e.store.SetServiceScoringPaused(svc.ID, paused); err != nil {
 		return fmt.Errorf("engine: %s %s: %w", svc.Name, what, err)
 	}
-	return e.logServiceEvent(svc, eventType, svc.Name+" "+what)
+	return e.logServiceEvent(ActorAdmin, svc, eventType, svc.Name+" "+what)
 }
 
 // Reload reads the config file at configPath (the path given to New when
@@ -310,8 +322,17 @@ func (e *Engine) setServiceScoringPaused(name string, paused bool, eventType, wh
 // Reload never changes the engine state or the global scoring pause. An
 // invalid file changes nothing. Added names are in config order, removed ones
 // in name order; both are non-nil. If a store write fails partway the error
-// is returned with the changes made so far.
+// is returned with the changes made so far. It acts for an admin; see
+// ReloadAs.
 func (e *Engine) Reload(configPath string) (added, removed []string, err error) {
+	return e.ReloadAs(ActorAdmin, configPath)
+}
+
+// ReloadAs is Reload with its events attributed to actor. A reload by
+// ActorSystem (the app's startup sync) that changes nothing writes no
+// config_reloaded event, so an ordinary boot does not add one every time; an
+// admin's reload is always logged, being an admin action.
+func (e *Engine) ReloadAs(actor Actor, configPath string) (added, removed []string, err error) {
 	if configPath == "" {
 		configPath = e.configPath
 	}
@@ -343,7 +364,7 @@ func (e *Engine) Reload(configPath string) (added, removed []string, err error) 
 		if inConfig[svc.Name] {
 			continue
 		}
-		if err := e.retire(svc); err != nil {
+		if err := e.retire(actor, svc); err != nil {
 			return added, removed, err
 		}
 		removed = append(removed, svc.Name)
@@ -352,32 +373,35 @@ func (e *Engine) Reload(configPath string) (added, removed []string, err error) 
 		if isActive[sc.Name] {
 			continue
 		}
-		if err := e.activate(sc.Name, running); err != nil {
+		if err := e.activate(actor, sc.Name, running); err != nil {
 			return added, removed, err
 		}
 		added = append(added, sc.Name)
 	}
 
+	if actor == ActorSystem && len(added) == 0 && len(removed) == 0 {
+		return added, removed, nil
+	}
 	msg := fmt.Sprintf("config reloaded: added [%s], removed [%s]",
 		strings.Join(added, ", "), strings.Join(removed, ", "))
-	return added, removed, e.logEngineEvent(EventConfigReloaded, msg)
+	return added, removed, e.logEngineEvent(actor, EventConfigReloaded, msg)
 }
 
 // retire stops svc's routine and deactivates it. The caller holds mu.
-func (e *Engine) retire(svc store.Service) error {
+func (e *Engine) retire(actor Actor, svc store.Service) error {
 	e.scheduler.StopService(svc.ID)
 	if err := e.store.SetServiceActive(svc.ID, false); err != nil {
 		return fmt.Errorf("engine: retiring %s: %w", svc.Name, err)
 	}
 	// Re-adding the name later enables it afresh.
 	delete(e.desiredEnabled, svc.ID)
-	return e.logServiceEvent(svc, EventServiceRemoved, svc.Name+" removed from config; deactivated")
+	return e.logServiceEvent(actor, svc, EventServiceRemoved, svc.Name+" removed from config; deactivated")
 }
 
 // activate creates or reactivates the service called name, enables it, and
 // starts its routine if the engine is running. A routine that fails to start
 // is logged and does not fail the reload. The caller holds mu.
-func (e *Engine) activate(name string, running bool) error {
+func (e *Engine) activate(actor Actor, name string, running bool) error {
 	svc, err := e.store.GetOrCreateService(e.session.ID, name)
 	if err != nil {
 		return fmt.Errorf("engine: adding %s: %w", name, err)
@@ -391,7 +415,7 @@ func (e *Engine) activate(name string, running bool) error {
 		msg = name + " re-added from config; reactivated with its history"
 	}
 	e.desiredEnabled[svc.ID] = true
-	if err := e.logServiceEvent(svc, EventServiceAdded, msg); err != nil {
+	if err := e.logServiceEvent(actor, svc, EventServiceAdded, msg); err != nil {
 		return err
 	}
 	if running {
@@ -516,7 +540,7 @@ func (e *Engine) startRoutine(svc store.Service) error {
 		return nil
 	}
 	if err := e.scheduler.StartService(svc.ID, svc.Name); err != nil {
-		e.logStartFailure(svc, actorSystem, err)
+		e.logStartFailure(svc, ActorSystem, err)
 		return fmt.Errorf("engine: starting %s: %w", svc.Name, err)
 	}
 	e.snapshotConfig(svc)
@@ -536,7 +560,7 @@ func (e *Engine) snapshotConfig(svc store.Service) {
 	}
 	if err != nil {
 		_ = e.logEvent(store.Event{
-			ServiceID: &svc.ID, Level: "error", Actor: actorSystem, Type: EventConfigSnapshotFailed,
+			ServiceID: &svc.ID, Level: "error", Actor: string(ActorSystem), Type: EventConfigSnapshotFailed,
 			Message: "could not record the config " + svc.Name + " started with", Detail: err.Error(),
 		})
 	}
@@ -544,22 +568,22 @@ func (e *Engine) snapshotConfig(svc store.Service) {
 
 // logStartFailure records that svc's routine failed to start. Best effort:
 // the caller is already handling the start failure itself.
-func (e *Engine) logStartFailure(svc store.Service, actor string, cause error) {
+func (e *Engine) logStartFailure(svc store.Service, actor Actor, cause error) {
 	_ = e.logEvent(store.Event{
-		ServiceID: &svc.ID, Level: "error", Actor: actor, Type: EventRoutineStartFailed,
+		ServiceID: &svc.ID, Level: "error", Actor: string(actor), Type: EventRoutineStartFailed,
 		Message: svc.Name + " routine failed to start", Detail: cause.Error(),
 	})
 }
 
-// logEngineEvent records an admin action on the whole engine.
-func (e *Engine) logEngineEvent(eventType, message string) error {
-	return e.logEvent(store.Event{Level: "info", Actor: actorAdmin, Type: eventType, Message: message})
+// logEngineEvent records actor's action on the whole engine.
+func (e *Engine) logEngineEvent(actor Actor, eventType, message string) error {
+	return e.logEvent(store.Event{Level: "info", Actor: string(actor), Type: eventType, Message: message})
 }
 
-// logServiceEvent records an admin action on svc.
-func (e *Engine) logServiceEvent(svc store.Service, eventType, message string) error {
+// logServiceEvent records actor's action on svc.
+func (e *Engine) logServiceEvent(actor Actor, svc store.Service, eventType, message string) error {
 	return e.logEvent(store.Event{
-		ServiceID: &svc.ID, Level: "info", Actor: actorAdmin, Type: eventType, Message: message,
+		ServiceID: &svc.ID, Level: "info", Actor: string(actor), Type: eventType, Message: message,
 	})
 }
 
