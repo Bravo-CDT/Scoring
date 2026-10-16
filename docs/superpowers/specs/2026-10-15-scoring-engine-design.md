@@ -319,7 +319,8 @@ routine's last result is stale); a service with no result yet counts as
 not failing. The trigger is edge-based: it fires when the share crosses
 the threshold from below, so an admin's resume during the same ongoing
 mass failure is not overridden — the share must first drop below the
-threshold and cross again. A freshly started engine has seen no crossing
+threshold and cross again. A crossing while scoring is already paused
+(a manual pause) is consumed the same way, without an event. A freshly started engine has seen no crossing
 yet, so it fires only after observing the share below the threshold.
 
 ## Data model
