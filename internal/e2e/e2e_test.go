@@ -1,0 +1,492 @@
+// Package e2e drives the fully wired scoring engine over HTTP, in-process.
+//
+// Every stack is built by app.New, the same function cmd/scoringengine calls,
+// so these tests exercise the real wiring rather than a copy of it. The only
+// substitutions are the ones app.Options exists for: a fake check registry
+// (always-failing tcp_connect) and no start-up stagger, so the tests are
+// deterministic and fast.
+package e2e
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+
+	"golang.org/x/crypto/bcrypt"
+
+	"github.com/Bravo-CDT/Scoring/internal/app"
+	"github.com/Bravo-CDT/Scoring/internal/checks"
+)
+
+const (
+	adminUser     = "admin"
+	adminPassword = "e2e-secret"
+	hashEnvVar    = "E2E_ADMIN_PASSWORD_HASH"
+
+	startingScore    = 1000
+	pointsPerFailure = 10
+
+	// failDetail is what the fake check reports; it stands in for the
+	// sensitive detail text the public API must never reveal.
+	failDetail = "simulated outage: token=hunter2"
+
+	// waitTimeout bounds every poll. Checks run every second, so anything
+	// that should happen does so within a couple of seconds.
+	waitTimeout = 10 * time.Second
+	// quietPeriod is how long a negative assertion ("nothing changed") waits:
+	// comfortably more than two check intervals.
+	quietPeriod = 2500 * time.Millisecond
+)
+
+// writeConfig writes a config with one 1-second tcp_connect service per
+// name. The admin hash comes from the environment, as in production.
+func writeConfig(t *testing.T, path string, services ...string) {
+	t.Helper()
+	var b strings.Builder
+	fmt.Fprintf(&b, "session_name: e2e-comp\nstarting_score: %d\n", startingScore)
+	fmt.Fprintf(&b, "admin:\n  username: %s\n  password_hash: ${%s}\nservices:\n", adminUser, hashEnvVar)
+	for _, name := range services {
+		fmt.Fprintf(&b, "  - name: %s\n    host: 127.0.0.1\n    check_type: tcp_connect\n"+
+			"    interval_seconds: 1\n    points_per_failure: %d\n    params: {port: 9}\n", name, pointsPerFailure)
+	}
+	if err := os.WriteFile(path, []byte(b.String()), 0o600); err != nil {
+		t.Fatalf("writing config: %v", err)
+	}
+}
+
+// failingRegistry replaces tcp_connect with a check that always fails, so
+// score movement is deterministic and no real network is touched.
+func failingRegistry() *checks.Registry {
+	r := checks.NewRegistry()
+	r.Register("tcp_connect", func(context.Context, string, map[string]any) checks.Result {
+		return checks.Result{Success: false, Detail: failDetail}
+	})
+	return r
+}
+
+// stack is one simulated process: an app.App served over a test listener.
+type stack struct {
+	t      *testing.T
+	app    *app.App
+	server *httptest.Server
+	closed bool
+}
+
+func newStack(t *testing.T, dbPath, configPath string) *stack {
+	t.Helper()
+	noStagger := time.Duration(0)
+	a, err := app.New(app.Options{
+		ConfigPath: configPath,
+		DBPath:     dbPath,
+		Registry:   failingRegistry(),
+		MaxStagger: &noStagger,
+	})
+	if err != nil {
+		t.Fatalf("app.New: %v", err)
+	}
+	s := &stack{t: t, app: a, server: httptest.NewServer(a.Handler)}
+	t.Cleanup(s.close)
+	return s
+}
+
+// close shuts the stack down the way main does: stop serving, then stop the
+// engine and close the store.
+func (s *stack) close() {
+	if s.closed {
+		return
+	}
+	s.closed = true
+	s.server.Close()
+	if err := s.app.Close(); err != nil {
+		s.t.Errorf("app.Close: %v", err)
+	}
+}
+
+// do sends a request and decodes the JSON response into out (if non-nil),
+// returning the status code.
+func (s *stack) do(method, path, token string, body, out any) int {
+	s.t.Helper()
+	var buf bytes.Buffer
+	if body != nil {
+		if err := json.NewEncoder(&buf).Encode(body); err != nil {
+			s.t.Fatalf("encoding body for %s %s: %v", method, path, err)
+		}
+	}
+	req, err := http.NewRequest(method, s.server.URL+path, &buf)
+	if err != nil {
+		s.t.Fatalf("building %s %s: %v", method, path, err)
+	}
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
+	resp, err := s.server.Client().Do(req)
+	if err != nil {
+		s.t.Fatalf("%s %s: %v", method, path, err)
+	}
+	defer resp.Body.Close()
+	if out != nil {
+		if err := json.NewDecoder(resp.Body).Decode(out); err != nil {
+			s.t.Fatalf("decoding %s %s (status %d): %v", method, path, resp.StatusCode, err)
+		}
+	}
+	return resp.StatusCode
+}
+
+// admin POSTs an admin action and fails the test unless it succeeds.
+func (s *stack) admin(token, path string) {
+	s.t.Helper()
+	var out map[string]any
+	if code := s.do(http.MethodPost, path, token, nil, &out); code != http.StatusOK {
+		s.t.Fatalf("POST %s: status %d, body %v", path, code, out)
+	}
+}
+
+func (s *stack) login() string {
+	s.t.Helper()
+	var out struct {
+		Token string `json:"token"`
+	}
+	creds := map[string]string{"username": adminUser, "password": adminPassword}
+	if code := s.do(http.MethodPost, "/login", "", creds, &out); code != http.StatusOK || out.Token == "" {
+		s.t.Fatalf("login: status %d, token %q", code, out.Token)
+	}
+	return out.Token
+}
+
+type serviceStatus struct {
+	Name           string `json:"name"`
+	RoutineEnabled bool   `json:"routine_enabled"`
+	ScoringPaused  bool   `json:"scoring_paused"`
+}
+
+type status struct {
+	BlueScore     int             `json:"blue_score"`
+	RedScore      int             `json:"red_score"`
+	EngineState   string          `json:"engine_state"`
+	ScoringPaused bool            `json:"scoring_paused"`
+	Services      []serviceStatus `json:"services"`
+}
+
+func (st status) service(t *testing.T, name string) serviceStatus {
+	t.Helper()
+	for _, svc := range st.Services {
+		if svc.Name == name {
+			return svc
+		}
+	}
+	t.Fatalf("service %q not in status %+v", name, st.Services)
+	return serviceStatus{}
+}
+
+func (s *stack) status() status {
+	s.t.Helper()
+	var st status
+	if code := s.do(http.MethodGet, "/status", "", nil, &st); code != http.StatusOK {
+		s.t.Fatalf("GET /status: status %d", code)
+	}
+	return st
+}
+
+type result struct {
+	ID      int64   `json:"id"`
+	Success bool    `json:"success"`
+	Detail  *string `json:"detail"`
+}
+
+// results returns a service's check history, newest first, as seen with the
+// given token ("" for the public view).
+func (s *stack) results(name, token string) []result {
+	s.t.Helper()
+	var out []result
+	path := "/services/" + name + "/results?limit=500"
+	if code := s.do(http.MethodGet, path, token, nil, &out); code != http.StatusOK {
+		s.t.Fatalf("GET %s: status %d", path, code)
+	}
+	return out
+}
+
+// latestResultID is the ID of a service's newest check result, 0 if none.
+func (s *stack) latestResultID(name string) int64 {
+	s.t.Helper()
+	if rs := s.results(name, ""); len(rs) > 0 {
+		return rs[0].ID
+	}
+	return 0
+}
+
+// awaitNewResults waits until name has recorded n results after the current
+// newest one, proving its routine is still checking.
+func (s *stack) awaitNewResults(name string, n int) {
+	s.t.Helper()
+	after := s.latestResultID(name)
+	waitFor(s.t, fmt.Sprintf("%d new %s results after #%d", n, name, after), func() bool {
+		count := 0
+		for _, r := range s.results(name, "") {
+			if r.ID > after {
+				count++
+			}
+		}
+		return count >= n
+	})
+}
+
+func waitFor(t *testing.T, what string, cond func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(waitTimeout)
+	for !cond() {
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out after %v waiting for %s", waitTimeout, what)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+}
+
+func setAdminHash(t *testing.T) {
+	t.Helper()
+	hash, err := bcrypt.GenerateFromPassword([]byte(adminPassword), bcrypt.MinCost)
+	if err != nil {
+		t.Fatalf("bcrypt: %v", err)
+	}
+	t.Setenv(hashEnvVar, string(hash))
+}
+
+// TestEndToEnd_LifecycleAndRestart walks one competition through every
+// control a scoring admin uses, then restarts the process against the same
+// database and config and checks exactly what does and does not survive.
+func TestEndToEnd_LifecycleAndRestart(t *testing.T) {
+	setAdminHash(t)
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "scoring.db")
+	configPath := filepath.Join(dir, "config.yaml")
+	writeConfig(t, configPath, "svc1", "svc2")
+
+	s1 := newStack(t, dbPath, configPath)
+
+	// A fresh process comes up safe: engine stopped, scoring paused, every
+	// configured service synced from the config, nothing checked yet.
+	st := s1.status()
+	if st.EngineState != "stopped" || !st.ScoringPaused {
+		t.Fatalf("fresh process: engine_state=%q scoring_paused=%v, want stopped and paused", st.EngineState, st.ScoringPaused)
+	}
+	if st.BlueScore != startingScore || len(st.Services) != 2 {
+		t.Fatalf("fresh process: blue_score=%d services=%+v, want %d and svc1+svc2", st.BlueScore, st.Services, startingScore)
+	}
+
+	// Admin endpoints need a token.
+	if code := s1.do(http.MethodPost, "/engine/start", "", nil, nil); code != http.StatusUnauthorized {
+		t.Fatalf("POST /engine/start without token: status %d, want 401", code)
+	}
+	token := s1.login()
+
+	t.Log("start: checks run, but scoring is still globally paused, so the score holds")
+	s1.admin(token, "/engine/start")
+	s1.awaitNewResults("svc1", 2)
+	if got := s1.status().BlueScore; got != startingScore {
+		t.Fatalf("blue_score = %d while globally paused since start, want %d", got, startingScore)
+	}
+
+	t.Log("resume: failing checks now deduct points")
+	s1.admin(token, "/scoring/resume")
+	waitFor(t, "a deduction after resuming scoring", func() bool {
+		st := s1.status()
+		return st.BlueScore < startingScore && st.RedScore > 0
+	})
+
+	t.Log("global pause: checks continue, score freezes")
+	s1.admin(token, "/scoring/pause")
+	s1.awaitNewResults("svc1", 1) // let any result scored before the pause land
+	frozen := s1.status().BlueScore
+	s1.awaitNewResults("svc1", 2)
+	s1.awaitNewResults("svc2", 2)
+	if got := s1.status().BlueScore; got != frozen {
+		t.Fatalf("blue_score moved under global pause: %d -> %d", frozen, got)
+	}
+	s1.admin(token, "/scoring/resume")
+
+	t.Log("per-service pause: svc1 keeps checking but stops scoring (svc2's routine stopped, so svc1 is the only source)")
+	s1.admin(token, "/services/svc2/stop")
+	s1.admin(token, "/services/svc1/scoring/pause")
+	s1.awaitNewResults("svc1", 1)
+	frozen = s1.status().BlueScore
+	s1.awaitNewResults("svc1", 2)
+	st = s1.status()
+	if st.BlueScore != frozen {
+		t.Fatalf("blue_score moved while svc1 was paused and svc2 stopped: %d -> %d", frozen, st.BlueScore)
+	}
+	if st.ScoringPaused || !st.service(t, "svc1").ScoringPaused || st.service(t, "svc2").RoutineEnabled {
+		t.Fatalf("unexpected state after per-service pause: %+v", st)
+	}
+
+	t.Log("/reload adds svc3, which starts immediately and (unpaused) scores")
+	writeConfig(t, configPath, "svc1", "svc2", "svc3")
+	var reload struct {
+		Added   []string `json:"added"`
+		Removed []string `json:"removed"`
+	}
+	if code := s1.do(http.MethodPost, "/reload", token, nil, &reload); code != http.StatusOK {
+		t.Fatalf("POST /reload: status %d", code)
+	}
+	if len(reload.Added) != 1 || reload.Added[0] != "svc3" || len(reload.Removed) != 0 {
+		t.Fatalf("reload = %+v, want added [svc3], removed []", reload)
+	}
+	if !s1.status().service(t, "svc3").RoutineEnabled {
+		t.Fatal("svc3 routine not running after reload on a running engine")
+	}
+	beforeSvc3 := s1.status().BlueScore
+	waitFor(t, "svc3 failures to deduct points", func() bool { return s1.status().BlueScore < beforeSvc3 })
+
+	t.Log("detail text: hidden from the public, shown to the admin")
+	for _, r := range s1.results("svc1", "") {
+		if r.Detail != nil {
+			t.Fatalf("public result #%d exposes detail %q", r.ID, *r.Detail)
+		}
+	}
+	adminView := s1.results("svc1", token)
+	if len(adminView) == 0 || adminView[0].Detail == nil || *adminView[0].Detail != failDetail {
+		t.Fatalf("admin view of svc1 results lacks the check detail: %+v", adminView)
+	}
+	var events []map[string]any
+	s1.do(http.MethodGet, "/events?limit=500", "", nil, &events)
+	for _, ev := range events {
+		if _, ok := ev["detail"]; ok {
+			t.Fatalf("public event exposes detail: %v", ev)
+		}
+	}
+
+	t.Log("engine stop: no new check results")
+	s1.admin(token, "/engine/stop")
+	historyBefore := s1.results("svc1", token)
+	svc3Before := s1.latestResultID("svc3")
+	time.Sleep(quietPeriod)
+	if got := s1.latestResultID("svc1"); got != historyBefore[0].ID {
+		t.Fatalf("svc1 recorded result #%d after engine stop (last was #%d)", got, historyBefore[0].ID)
+	}
+	if got := s1.latestResultID("svc3"); got != svc3Before {
+		t.Fatalf("svc3 recorded result #%d after engine stop (last was #%d)", got, svc3Before)
+	}
+	st = s1.status()
+	for _, svc := range st.Services {
+		if svc.RoutineEnabled {
+			t.Fatalf("%s routine still running after engine stop", svc.Name)
+		}
+	}
+	scoreBefore := st.BlueScore
+
+	// Before restarting, drop svc3 from the config: startup must retire it.
+	writeConfig(t, configPath, "svc1", "svc2")
+	s1.close()
+
+	t.Log("restart: a genuinely fresh stack on the same database and config")
+	s2 := newStack(t, dbPath, configPath)
+	st = s2.status()
+	if st.EngineState != "stopped" || !st.ScoringPaused {
+		t.Fatalf("after restart: engine_state=%q scoring_paused=%v, want stopped and paused", st.EngineState, st.ScoringPaused)
+	}
+	if st.BlueScore != scoreBefore {
+		t.Fatalf("after restart: blue_score=%d, want %d (score must not reset)", st.BlueScore, scoreBefore)
+	}
+	if len(st.Services) != 2 {
+		t.Fatalf("after restart: services=%+v, want svc1 and svc2 (svc3 retired at startup)", st.Services)
+	}
+	if !st.service(t, "svc1").ScoringPaused {
+		t.Fatal("after restart: svc1's per-service scoring pause was lost")
+	}
+	if st.service(t, "svc2").ScoringPaused {
+		t.Fatal("after restart: svc2 scoring_paused, want false")
+	}
+
+	historyAfter := s2.results("svc1", "")
+	if len(historyAfter) != len(historyBefore) || historyAfter[0].ID != historyBefore[0].ID {
+		t.Fatalf("after restart: svc1 history has %d results (newest #%d), want %d (newest #%d)",
+			len(historyAfter), historyAfter[0].ID, len(historyBefore), historyBefore[0].ID)
+	}
+	if rs := s2.results("svc3", ""); len(rs) == 0 {
+		t.Fatal("after restart: retired svc3's history is no longer queryable")
+	}
+	events = nil
+	s2.do(http.MethodGet, "/events?limit=500", "", nil, &events)
+	if !hasEvent(events, "engine_started") || !hasEvent(events, "service_removed") {
+		t.Fatalf("after restart: event history lacks the earlier engine_started and the startup service_removed: %v", events)
+	}
+
+	if code := s2.do(http.MethodPost, "/engine/start", token, nil, nil); code != http.StatusUnauthorized {
+		t.Fatalf("old token on the new process: status %d, want 401", code)
+	}
+	token2 := s2.login()
+
+	t.Log("start again: svc2's routine stop did not survive; scoring stays paused until resumed")
+	s2.admin(token2, "/engine/start")
+	if !s2.status().service(t, "svc2").RoutineEnabled {
+		t.Fatal("after restart: svc2's routine did not start (routine stop must reset on restart)")
+	}
+	s2.awaitNewResults("svc2", 2)
+	if got := s2.status().BlueScore; got != scoreBefore {
+		t.Fatalf("after restart: blue_score moved while globally paused: %d -> %d", scoreBefore, got)
+	}
+
+	s2.admin(token2, "/scoring/resume")
+	waitFor(t, "svc2 to deduct points after resume", func() bool { return s2.status().BlueScore < scoreBefore })
+}
+
+func hasEvent(events []map[string]any, eventType string) bool {
+	for _, ev := range events {
+		if ev["type"] == eventType {
+			return true
+		}
+	}
+	return false
+}
+
+// TestExampleConfigStarts keeps the documented config.example.yaml in step
+// with the code: the real wiring must accept it as shipped.
+func TestExampleConfigStarts(t *testing.T) {
+	hash, err := bcrypt.GenerateFromPassword([]byte(adminPassword), bcrypt.MinCost)
+	if err != nil {
+		t.Fatalf("bcrypt: %v", err)
+	}
+	t.Setenv("ADMIN_PASSWORD_HASH", string(hash))
+	s := newStack(t, filepath.Join(t.TempDir(), "scoring.db"), filepath.Join("..", "..", "config.example.yaml"))
+	if st := s.status(); len(st.Services) == 0 {
+		t.Fatal("config.example.yaml configures no services")
+	}
+	s.login()
+}
+
+// TestNew_FailsFastOnBadInputs checks that a misconfigured deployment is
+// rejected up front with an error naming the problem.
+func TestNew_FailsFastOnBadInputs(t *testing.T) {
+	setAdminHash(t)
+	dir := t.TempDir()
+	goodConfig := filepath.Join(dir, "config.yaml")
+	writeConfig(t, goodConfig, "svc1")
+
+	cases := []struct {
+		name       string
+		configPath string
+		dbPath     string
+		wantErr    string
+	}{
+		{"missing config", filepath.Join(dir, "nope.yaml"), filepath.Join(dir, "a.db"), "nope.yaml"},
+		{"missing db directory", goodConfig, filepath.Join(dir, "no-such-dir", "scoring.db"), "no-such-dir"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			a, err := app.New(app.Options{ConfigPath: tc.configPath, DBPath: tc.dbPath})
+			if err == nil {
+				a.Close()
+				t.Fatal("app.New succeeded, want an error")
+			}
+			if !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("error %q does not mention %q", err, tc.wantErr)
+			}
+		})
+	}
+}
