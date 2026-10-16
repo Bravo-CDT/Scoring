@@ -513,11 +513,11 @@ func TestRecord_MassFailureCrossingDuringManualPauseIsConsumed(t *testing.T) {
 	svcB := newService(t, st, sess.ID, "svc-b")
 	sc := New(st, sess.ID, fraction(0.5))
 
-	record(t, sc, svcB.ID, 10, pass) // arms
+	record(t, sc, svcB.ID, 10, pass)                        // arms
 	if err := st.SetGlobalScoringPaused(true); err != nil { // the admin's manual pause
 		t.Fatalf("SetGlobalScoringPaused(true): %v", err)
 	}
-	record(t, sc, svcA.ID, 10, fail) // 1 of 2 while paused: the crossing
+	record(t, sc, svcA.ID, 10, fail)                         // 1 of 2 while paused: the crossing
 	if err := st.SetGlobalScoringPaused(false); err != nil { // the admin resumes
 		t.Fatalf("SetGlobalScoringPaused(false): %v", err)
 	}
