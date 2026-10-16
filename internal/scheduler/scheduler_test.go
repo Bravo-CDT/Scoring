@@ -406,6 +406,42 @@ func TestStagger_DelaysFirstCheck(t *testing.T) {
 	}
 }
 
+func TestSetMaxStagger(t *testing.T) {
+	s := New(checks.NewRegistry(), &fakeSink{}, "unused.yaml")
+
+	s.SetMaxStagger(0)
+	for range 100 {
+		if d := s.stagger(); d != 0 {
+			t.Fatalf("SetMaxStagger(0): stagger returned %v, want 0", d)
+		}
+	}
+
+	const limit = 40 * time.Millisecond
+	s.SetMaxStagger(limit)
+	for range 100 {
+		if d := s.stagger(); d < 0 || d >= limit {
+			t.Fatalf("SetMaxStagger(%v): stagger returned %v, want within [0, %v)", limit, d, limit)
+		}
+	}
+}
+
+func TestSetMaxStagger_ZeroMakesFirstCheckImmediate(t *testing.T) {
+	sink := &fakeSink{}
+	s := New(registryWith(okCheck), sink, newConfig(t))
+	s.SetMaxStagger(0)
+	t.Cleanup(func() { s.StopService(1) })
+
+	start := time.Now()
+	if err := s.StartService(1, "svc1"); err != nil {
+		t.Fatalf("StartService: %v", err)
+	}
+	waitFor(t, "a recorded check", func() bool { return sink.count() >= 1 })
+	// The default stagger is up to 5s; with none, the first check is prompt.
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Errorf("first check after %v, want it immediately", elapsed)
+	}
+}
+
 func TestHungCheckIsForceFailedAtDeadline(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.yaml")
 	writeConfig(t, path, configYAML(serviceYAML("svc1", 3, 10))) // 60ms deadline

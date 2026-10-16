@@ -112,6 +112,25 @@ func (s *Store) GetOrCreateService(sessionID int64, name string) (Service, error
 	}, nil
 }
 
+// GetServiceByName looks up the service called name in session sessionID,
+// reporting found = false (and no error) when there is none. Inactive services
+// are returned too, with Active = false.
+//
+// Unlike GetOrCreateService it never creates a row: the engine resolves
+// admin-supplied names with it, and must be able to tell an unknown name
+// apart from a valid one rather than conjuring a service from a typo.
+func (s *Store) GetServiceByName(sessionID int64, name string) (Service, bool, error) {
+	svc, err := s.findService(sessionID, name)
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+		return Service{}, false, nil
+	case err != nil:
+		return Service{}, false, err
+	default:
+		return svc, true, nil
+	}
+}
+
 // GetService loads the service with the given id. The returned error wraps
 // sql.ErrNoRows when there is no such service, so a caller handed an id from
 // outside (an admin request, say) can tell "no such service" apart from "the

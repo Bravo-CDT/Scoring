@@ -555,3 +555,85 @@ func TestCountActiveServiceOutcomes_NoServices(t *testing.T) {
 		t.Errorf("active=%d failing=%d, want 0/0", active, failing)
 	}
 }
+
+func TestCountConsecutiveFailures(t *testing.T) {
+	base := time.Date(2026, 10, 15, 12, 0, 0, 0, time.UTC)
+	tests := []struct {
+		name    string
+		results []bool // success flags in timestamp order, oldest first
+		want    int
+	}{
+		{"no results", nil, 0},
+		{"latest succeeded", []bool{false, false, true}, 0},
+		{"all failed", []bool{false, false, false}, 3},
+		{"failures since last success", []bool{false, true, false, false}, 2},
+		{"single failure", []bool{true, false}, 1},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			st := openTemp(t)
+			sessionID, serviceID := setupServiceForResults(t, st, "svc")
+			for i, ok := range tc.results {
+				insertOutcomeAt(t, st, sessionID, serviceID, base.Add(time.Duration(i)*time.Second), ok)
+			}
+			got, err := st.CountConsecutiveFailures(serviceID)
+			if err != nil {
+				t.Fatalf("CountConsecutiveFailures: %v", err)
+			}
+			if got != tc.want {
+				t.Errorf("CountConsecutiveFailures = %d, want %d", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestCountConsecutiveFailures_OrdersByTimestampThenID(t *testing.T) {
+	st := openTemp(t)
+	sessionID, serviceID := setupServiceForResults(t, st, "svc")
+	base := time.Date(2026, 10, 15, 12, 0, 0, 0, time.UTC)
+
+	// Written out of timestamp order: the success at base+2s is the most
+	// recent success even though a failure with an earlier timestamp was
+	// written after it. The two failures at base+3s tie on timestamp and
+	// both count.
+	insertOutcomeAt(t, st, sessionID, serviceID, base.Add(2*time.Second), true)
+	insertOutcomeAt(t, st, sessionID, serviceID, base.Add(1*time.Second), false)
+	insertOutcomeAt(t, st, sessionID, serviceID, base.Add(3*time.Second), false)
+	insertOutcomeAt(t, st, sessionID, serviceID, base.Add(3*time.Second), false)
+
+	if got, err := st.CountConsecutiveFailures(serviceID); err != nil || got != 2 {
+		t.Errorf("CountConsecutiveFailures = %d, %v; want 2", got, err)
+	}
+
+	// A success in the same millisecond as those failures, written last, wins
+	// the id tiebreak and ends the streak.
+	insertOutcomeAt(t, st, sessionID, serviceID, base.Add(3*time.Second), true)
+	if got, err := st.CountConsecutiveFailures(serviceID); err != nil || got != 0 {
+		t.Errorf("after tied success: CountConsecutiveFailures = %d, %v; want 0", got, err)
+	}
+}
+
+func TestCountConsecutiveFailures_IsScopedToOneService(t *testing.T) {
+	st := openTemp(t)
+	sessionID, a := setupServiceForResults(t, st, "a")
+	_, b := setupServiceForResults(t, st, "b")
+	now := time.Now().UTC()
+	insertOutcomeAt(t, st, sessionID, a, now, false)
+	insertOutcomeAt(t, st, sessionID, a, now, false)
+	insertOutcomeAt(t, st, sessionID, b, now, false)
+
+	if got, err := st.CountConsecutiveFailures(b); err != nil || got != 1 {
+		t.Errorf("CountConsecutiveFailures(b) = %d, %v; want 1", got, err)
+	}
+}
+
+// insertOutcomeAt records one check result with the given outcome and
+// timestamp.
+func insertOutcomeAt(t *testing.T, st *Store, sessionID, serviceID int64, ts time.Time, success bool) {
+	t.Helper()
+	if _, err := st.InsertCheckResult(CheckResult{
+		SessionID: sessionID, ServiceID: serviceID, Timestamp: ts, Success: success,
+	}); err != nil {
+		t.Fatalf("InsertCheckResult: %v", err)
+	}
+}
