@@ -68,11 +68,11 @@ func newServer(e *engine.Engine, st *store.Store, sessionID int64, a *auth.Auth,
 	s.mux.HandleFunc("POST /login", s.handleLogin)
 
 	admin := func(pattern string, h http.HandlerFunc) { s.mux.Handle(pattern, a.RequireAdmin(h)) }
-	admin("POST /engine/start", s.engineAction(e.Start))
+	admin("POST /engine/start", s.handleEngineStart)
 	admin("POST /engine/stop", s.engineAction(e.Stop))
 	admin("POST /scoring/pause", s.engineAction(e.PauseScoring))
 	admin("POST /scoring/resume", s.engineAction(e.ResumeScoring))
-	admin("POST /services/{name}/start", s.serviceAction(e.StartService))
+	admin("POST /services/{name}/start", s.handleServiceStart)
 	admin("POST /services/{name}/stop", s.serviceAction(e.StopService))
 	admin("POST /services/{name}/restart", s.handleServiceRestart)
 	admin("POST /services/{name}/scoring/pause", s.serviceAction(e.PauseServiceScoring))

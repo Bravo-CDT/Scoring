@@ -3,6 +3,8 @@ package api
 import (
 	"errors"
 	"net/http"
+
+	"github.com/Bravo-CDT/Scoring/internal/engine"
 )
 
 type loginRequest struct {
@@ -54,48 +56,123 @@ func (s *server) serviceAction(action func(name string) error) http.HandlerFunc 
 	}
 }
 
+// The routes that start routines (engine start, service start and restart,
+// reload) report the routines that failed to start in a "failed" list of
+// {"service", "error"} objects. It is always present, empty when everything
+// started, so a client can check it unconditionally; the error text is the
+// cause (admin-only routes, so it is not hidden).
+
+// startResponse is the status answer of a route that starts routines.
+type startResponse struct {
+	engine.Status
+	Failed []engine.StartFailure `json:"failed"`
+}
+
+// startErrorResponse answers a single-service start or restart whose routine
+// failed to start.
+type startErrorResponse struct {
+	Error  string                `json:"error"`
+	Failed []engine.StartFailure `json:"failed"`
+}
+
+// handleEngineStart serves POST /engine/start. Routines that fail to start do
+// not fail the request: the engine is running and the others are checking,
+// so the answer is 200 with the current status and the failures listed.
+func (s *server) handleEngineStart(w http.ResponseWriter, r *http.Request) {
+	failed, err := s.engine.Start()
+	if err != nil {
+		s.adminError(w, r, err)
+		return
+	}
+	s.writeStartStatus(w, r, failed)
+}
+
+// handleServiceStart serves POST /services/{name}/start; see serviceStarted.
+func (s *server) handleServiceStart(w http.ResponseWriter, r *http.Request) {
+	s.serviceStarted(w, r, s.engine.StartService(r.PathValue("name")))
+}
+
 type restartRequest struct {
 	PauseScoring bool `json:"pause_scoring"`
 }
 
 // handleServiceRestart serves POST /services/{name}/restart with an optional
-// {"pause_scoring": bool} body.
+// {"pause_scoring": bool} body; see serviceStarted.
 func (s *server) handleServiceRestart(w http.ResponseWriter, r *http.Request) {
 	var req restartRequest
 	if err := decodeJSON(w, r, &req); err != nil && !errors.Is(err, errEmptyBody) {
 		writeBodyError(w, err)
 		return
 	}
-	if err := s.engine.RestartService(r.PathValue("name"), req.PauseScoring); err != nil {
+	s.serviceStarted(w, r, s.engine.RestartService(r.PathValue("name"), req.PauseScoring))
+}
+
+// serviceStarted answers a single-service start or restart. Its routine
+// failing to start is the one thing the admin asked for not happening, so it
+// is a 500 whose body has the reason as "error" and in "failed". The rest of
+// the request has still been applied: the service is enabled (it starts with
+// the next engine start once its config is fixed) and a requested scoring
+// pause is persisted. Success is 200 with the status and an empty "failed".
+func (s *server) serviceStarted(w http.ResponseWriter, r *http.Request, err error) {
+	var startErr *engine.StartError
+	switch {
+	case errors.As(err, &startErr):
+		s.logger.Printf("api: %s %s: %v", r.Method, r.URL.Path, err)
+		writeJSON(w, http.StatusInternalServerError, startErrorResponse{
+			Error:  err.Error(),
+			Failed: []engine.StartFailure{startErr.Failure()},
+		})
+	case err != nil:
 		s.adminError(w, r, err)
-		return
+	default:
+		s.writeStartStatus(w, r, nil)
 	}
-	s.writeCurrentStatus(w, r)
 }
 
 // writeCurrentStatus answers a successful admin action with the engine's
 // status. Should reading it fail, the 500 says the action itself took effect.
 func (s *server) writeCurrentStatus(w http.ResponseWriter, r *http.Request) {
+	if status, ok := s.statusAfterAction(w, r); ok {
+		writeJSON(w, http.StatusOK, status)
+	}
+}
+
+// writeStartStatus is writeCurrentStatus for the routes that start routines:
+// the status plus the failed list (never null).
+func (s *server) writeStartStatus(w http.ResponseWriter, r *http.Request, failed []engine.StartFailure) {
+	if failed == nil {
+		failed = []engine.StartFailure{}
+	}
+	if status, ok := s.statusAfterAction(w, r); ok {
+		writeJSON(w, http.StatusOK, startResponse{Status: status, Failed: failed})
+	}
+}
+
+// statusAfterAction reads the status to answer an admin action with. On
+// failure it answers the request itself, saying the action took effect.
+func (s *server) statusAfterAction(w http.ResponseWriter, r *http.Request) (engine.Status, bool) {
 	status, err := s.engine.Status()
 	if err != nil {
 		s.logger.Printf("api: %s %s: reading status after the action: %v", r.Method, r.URL.Path, err)
 		writeError(w, http.StatusInternalServerError, "action applied, but reading the current status failed: "+err.Error())
-		return
+		return engine.Status{}, false
 	}
-	writeJSON(w, http.StatusOK, status)
+	return status, true
 }
 
 type reloadResponse struct {
-	Added   []string `json:"added"`
-	Removed []string `json:"removed"`
-	Error   string   `json:"error,omitempty"`
+	engine.ReloadResult
+	Error string `json:"error,omitempty"`
 }
 
-// handleReload serves POST /reload. On failure the 500 body carries, beside
-// the error, whatever changes were made before it.
+// handleReload serves POST /reload: {"added", "removed", "failed"}. An added
+// service whose routine fails to start is still added, so that is a 200 with
+// the failure in "failed". A reload that fails as a whole (an invalid file, a
+// store error) is a 500 whose body carries, beside the error, whatever
+// changes were made before it.
 func (s *server) handleReload(w http.ResponseWriter, r *http.Request) {
-	added, removed, err := s.engine.Reload(s.configPath)
-	resp := reloadResponse{Added: nonNil(added), Removed: nonNil(removed)}
+	res, err := s.engine.Reload(s.configPath)
+	resp := reloadResponse{ReloadResult: res}
 	if err != nil {
 		s.logger.Printf("api: %s %s: %v", r.Method, r.URL.Path, err)
 		resp.Error = err.Error()
@@ -103,11 +180,4 @@ func (s *server) handleReload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, resp)
-}
-
-func nonNil(s []string) []string {
-	if s == nil {
-		return []string{}
-	}
-	return s
 }

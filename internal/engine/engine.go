@@ -47,6 +47,43 @@ const (
 	EventConfigSnapshotFailed  = "config_snapshot_failed"
 )
 
+// StartFailure reports one service whose routine failed to start, for the
+// operations that start several (Start, Reload). The failure is also logged
+// as a routine_start_failed event.
+type StartFailure struct {
+	Service string `json:"service"`
+	Error   string `json:"error"`
+}
+
+// StartError is the error StartService and RestartService return when the
+// service's routine failed to start. Everything else the call does has been
+// applied by then (the service is enabled, a requested scoring pause is
+// persisted), so the service starts with the next successful attempt.
+type StartError struct {
+	Service string
+	Err     error
+}
+
+func (e *StartError) Error() string {
+	return fmt.Sprintf("engine: %s routine failed to start: %v", e.Service, e.Err)
+}
+
+func (e *StartError) Unwrap() error { return e.Err }
+
+// Failure returns e as a StartFailure.
+func (e *StartError) Failure() StartFailure {
+	return StartFailure{Service: e.Service, Error: e.Err.Error()}
+}
+
+// ReloadResult is what Reload changed: the services added and removed, in the
+// orders Reload documents, and the added services whose routine failed to
+// start. All three are non-nil.
+type ReloadResult struct {
+	Added   []string       `json:"added"`
+	Removed []string       `json:"removed"`
+	Failed  []StartFailure `json:"failed"`
+}
+
 // Actor is who an event attributes an operation to.
 type Actor string
 
@@ -105,35 +142,41 @@ func New(st *store.Store, sess store.Session, sched *scheduler.Scheduler, config
 // was: resuming scoring is a separate decision (ResumeScoring).
 //
 // A service whose routine fails to start (its config entry is missing, say) is
-// logged as an error event and skipped; it does not stop the others starting,
-// and does not make Start fail. Start on a running engine starts any enabled
-// routine that is not running and is otherwise a no-op.
-func (e *Engine) Start() error {
+// logged as an error event, skipped and returned in failed (non-nil, empty
+// when every routine started); it does not stop the others starting, and does
+// not make Start fail: the engine is running either way. Start on a running
+// engine starts any enabled routine that is not running and is otherwise a
+// no-op.
+func (e *Engine) Start() (failed []StartFailure, err error) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 
+	failed = []StartFailure{}
 	rs, err := e.store.GetRunState()
 	if err != nil {
-		return fmt.Errorf("engine: starting: %w", err)
+		return failed, fmt.Errorf("engine: starting: %w", err)
 	}
 	svcs, err := e.store.ListActiveServices(e.session.ID)
 	if err != nil {
-		return fmt.Errorf("engine: starting: %w", err)
+		return failed, fmt.Errorf("engine: starting: %w", err)
 	}
 	if err := e.store.SetEngineState(store.EngineRunning); err != nil {
-		return fmt.Errorf("engine: starting: %w", err)
+		return failed, fmt.Errorf("engine: starting: %w", err)
 	}
 
 	for _, svc := range svcs {
-		if e.enabled(svc.ID) {
-			_ = e.startRoutine(svc) // a failure is logged by startRoutine
+		if !e.enabled(svc.ID) {
+			continue
+		}
+		if startErr := e.startRoutine(svc); startErr != nil {
+			failed = append(failed, startErr.Failure())
 		}
 	}
 
 	if rs.EngineState == store.EngineRunning {
-		return nil
+		return failed, nil
 	}
-	return e.logEngineEvent(ActorAdmin, EventEngineStarted, "engine started")
+	return failed, e.logEngineEvent(ActorAdmin, EventEngineStarted, "engine started")
 }
 
 // Stop marks the engine stopped and stops every routine, waiting for each to
@@ -193,7 +236,8 @@ func (e *Engine) setGlobalScoringPaused(paused bool, eventType, message string) 
 
 // StartService enables the named service's routine and, if the engine is
 // running, starts it. While the engine is stopped it only records that the
-// service should run once the engine starts.
+// service should run once the engine starts. If the routine fails to start
+// the error is a *StartError, and the service stays enabled.
 func (e *Engine) StartService(name string) error {
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -212,8 +256,8 @@ func (e *Engine) StartService(name string) error {
 		return e.logServiceEvent(ActorAdmin, svc, EventRoutineStarted,
 			svc.Name+" routine enabled; it starts when the engine starts")
 	}
-	if err := e.startRoutine(svc); err != nil {
-		return err
+	if startErr := e.startRoutine(svc); startErr != nil {
+		return startErr
 	}
 	return e.logServiceEvent(ActorAdmin, svc, EventRoutineStarted, svc.Name+" routine started")
 }
@@ -242,7 +286,9 @@ func (e *Engine) StopService(name string) error {
 // admin resumes the service.
 //
 // If the engine is stopped the routine is not started; the pause (if asked
-// for) and the enabled state still apply.
+// for) and the enabled state still apply. If the routine fails to start again
+// (the fresh config entry cannot be loaded, say) it is left stopped and the
+// error is a *StartError; the pause and the enabled state still apply.
 func (e *Engine) RestartService(name string, pauseScoring bool) error {
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -272,7 +318,7 @@ func (e *Engine) RestartService(name string, pauseScoring bool) error {
 	}
 	if err := e.scheduler.RestartService(svc.ID, svc.Name); err != nil {
 		e.logStartFailure(svc, ActorAdmin, err)
-		return fmt.Errorf("engine: restarting %s: %w", svc.Name, err)
+		return &StartError{Service: svc.Name, Err: err}
 	}
 	e.snapshotConfig(svc)
 	return e.logServiceEvent(ActorAdmin, svc, EventRoutineRestarted, svc.Name+" routine restarted with reloaded config")
@@ -320,11 +366,11 @@ func (e *Engine) setServiceScoringPaused(name string, paused bool, eventType, wh
 //     take effect on RestartService.
 //
 // Reload never changes the engine state or the global scoring pause. An
-// invalid file changes nothing. Added names are in config order, removed ones
-// in name order; both are non-nil. If a store write fails partway the error
-// is returned with the changes made so far. It acts for an admin; see
-// ReloadAs.
-func (e *Engine) Reload(configPath string) (added, removed []string, err error) {
+// invalid file changes nothing. An added service whose routine fails to start
+// is still added; the failure is logged and listed in the result's Failed,
+// and does not fail the reload. If a store write fails partway the error is
+// returned with the changes made so far. It acts for an admin; see ReloadAs.
+func (e *Engine) Reload(configPath string) (ReloadResult, error) {
 	return e.ReloadAs(ActorAdmin, configPath)
 }
 
@@ -332,26 +378,26 @@ func (e *Engine) Reload(configPath string) (added, removed []string, err error) 
 // ActorSystem (the app's startup sync) that changes nothing writes no
 // config_reloaded event, so an ordinary boot does not add one every time; an
 // admin's reload is always logged, being an admin action.
-func (e *Engine) ReloadAs(actor Actor, configPath string) (added, removed []string, err error) {
+func (e *Engine) ReloadAs(actor Actor, configPath string) (ReloadResult, error) {
 	if configPath == "" {
 		configPath = e.configPath
 	}
-	added, removed = []string{}, []string{}
+	res := ReloadResult{Added: []string{}, Removed: []string{}, Failed: []StartFailure{}}
 
 	e.mu.Lock()
 	defer e.mu.Unlock()
 
 	cfg, err := config.Load(configPath)
 	if err != nil {
-		return added, removed, fmt.Errorf("engine: reloading config: %w", err)
+		return res, fmt.Errorf("engine: reloading config: %w", err)
 	}
 	active, err := e.store.ListActiveServices(e.session.ID)
 	if err != nil {
-		return added, removed, fmt.Errorf("engine: reloading config: %w", err)
+		return res, fmt.Errorf("engine: reloading config: %w", err)
 	}
 	running, err := e.engineRunning()
 	if err != nil {
-		return added, removed, err
+		return res, err
 	}
 
 	inConfig := make(map[string]bool, len(cfg.Services))
@@ -365,26 +411,32 @@ func (e *Engine) ReloadAs(actor Actor, configPath string) (added, removed []stri
 			continue
 		}
 		if err := e.retire(actor, svc); err != nil {
-			return added, removed, err
+			return res, err
 		}
-		removed = append(removed, svc.Name)
+		res.Removed = append(res.Removed, svc.Name)
 	}
 	for _, sc := range cfg.Services {
 		if isActive[sc.Name] {
 			continue
 		}
-		if err := e.activate(actor, sc.Name, running); err != nil {
-			return added, removed, err
+		svc, err := e.activate(actor, sc.Name)
+		if err != nil {
+			return res, err
 		}
-		added = append(added, sc.Name)
+		res.Added = append(res.Added, sc.Name)
+		if running {
+			if startErr := e.startRoutine(svc); startErr != nil {
+				res.Failed = append(res.Failed, startErr.Failure())
+			}
+		}
 	}
 
-	if actor == ActorSystem && len(added) == 0 && len(removed) == 0 {
-		return added, removed, nil
+	if actor == ActorSystem && len(res.Added) == 0 && len(res.Removed) == 0 {
+		return res, nil
 	}
 	msg := fmt.Sprintf("config reloaded: added [%s], removed [%s]",
-		strings.Join(added, ", "), strings.Join(removed, ", "))
-	return added, removed, e.logEngineEvent(actor, EventConfigReloaded, msg)
+		strings.Join(res.Added, ", "), strings.Join(res.Removed, ", "))
+	return res, e.logEngineEvent(actor, EventConfigReloaded, msg)
 }
 
 // retire stops svc's routine and deactivates it. The caller holds mu.
@@ -398,30 +450,27 @@ func (e *Engine) retire(actor Actor, svc store.Service) error {
 	return e.logServiceEvent(actor, svc, EventServiceRemoved, svc.Name+" removed from config; deactivated")
 }
 
-// activate creates or reactivates the service called name, enables it, and
-// starts its routine if the engine is running. A routine that fails to start
-// is logged and does not fail the reload. The caller holds mu.
-func (e *Engine) activate(actor Actor, name string, running bool) error {
+// activate creates or reactivates the service called name and enables it,
+// returning its row; starting its routine is up to the caller. The caller
+// holds mu.
+func (e *Engine) activate(actor Actor, name string) (store.Service, error) {
 	svc, err := e.store.GetOrCreateService(e.session.ID, name)
 	if err != nil {
-		return fmt.Errorf("engine: adding %s: %w", name, err)
+		return store.Service{}, fmt.Errorf("engine: adding %s: %w", name, err)
 	}
 	msg := name + " added from config"
 	if !svc.Active {
 		if err := e.store.SetServiceActive(svc.ID, true); err != nil {
-			return fmt.Errorf("engine: reactivating %s: %w", name, err)
+			return store.Service{}, fmt.Errorf("engine: reactivating %s: %w", name, err)
 		}
 		svc.Active = true
 		msg = name + " re-added from config; reactivated with its history"
 	}
 	e.desiredEnabled[svc.ID] = true
 	if err := e.logServiceEvent(actor, svc, EventServiceAdded, msg); err != nil {
-		return err
+		return store.Service{}, err
 	}
-	if running {
-		_ = e.startRoutine(svc) // logged by startRoutine
-	}
-	return nil
+	return svc, nil
 }
 
 // ServiceStatus is one active service's current state.
@@ -535,13 +584,13 @@ func (e *Engine) engineRunning() (bool, error) {
 // the config it starts with. A failure to start is logged as a system error
 // event and returned. The caller holds mu, so no other operation can start or
 // stop the routine between the check and the start.
-func (e *Engine) startRoutine(svc store.Service) error {
+func (e *Engine) startRoutine(svc store.Service) *StartError {
 	if e.scheduler.IsRunning(svc.ID) {
 		return nil
 	}
 	if err := e.scheduler.StartService(svc.ID, svc.Name); err != nil {
 		e.logStartFailure(svc, ActorSystem, err)
-		return fmt.Errorf("engine: starting %s: %w", svc.Name, err)
+		return &StartError{Service: svc.Name, Err: err}
 	}
 	e.snapshotConfig(svc)
 	return nil

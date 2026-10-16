@@ -760,7 +760,7 @@ func TestReload(t *testing.T) {
 
 	r := h.do(http.MethodPost, "/reload", token, "")
 	h.mustStatus(r, http.StatusOK, "no-op reload")
-	if got := string(bytes.TrimSpace(r.body)); got != `{"added":[],"removed":[]}` {
+	if got := string(bytes.TrimSpace(r.body)); got != `{"added":[],"removed":[],"failed":[]}` {
 		t.Errorf("no-op reload body = %s, want empty lists", got)
 	}
 
@@ -778,6 +778,118 @@ func TestReload(t *testing.T) {
 	if msg, _ := r.object(t)["error"].(string); msg == "" {
 		t.Errorf("invalid reload body %s has no error", r.body)
 	}
+}
+
+// failedList returns the response's "failed" list as service -> error,
+// failing the test if the field is missing or not a list.
+func failedList(t *testing.T, body map[string]any) map[string]string {
+	t.Helper()
+	list, ok := body["failed"].([]any)
+	if !ok {
+		t.Fatalf(`response %v has no "failed" list`, body)
+	}
+	out := make(map[string]string, len(list))
+	for _, item := range list {
+		f, _ := item.(map[string]any)
+		svc, _ := f["service"].(string)
+		msg, _ := f["error"].(string)
+		out[svc] = msg
+	}
+	return out
+}
+
+// A config edit that breaks one service must show up in the response of
+// every route that starts routines, not only in the event log, and must not
+// disturb the routines already running.
+func TestStartFailures_AreReportedInResponses(t *testing.T) {
+	h := newHarness(t, okCheck, "svc1", "svc2")
+	token := h.login()
+
+	r := h.do(http.MethodPost, "/engine/start", token, "")
+	h.mustStatus(r, http.StatusOK, "engine start")
+	if out := r.object(t); len(failedList(t, out)) != 0 || out["engine_state"] != "running" {
+		t.Fatalf("engine start = %v, want running with an empty failed list", out)
+	}
+	for _, path := range []string{"/services/svc1/start", "/services/svc1/restart"} {
+		r := h.do(http.MethodPost, path, token, "")
+		h.mustStatus(r, http.StatusOK, path)
+		if f := failedList(t, r.object(t)); len(f) != 0 {
+			t.Errorf("%s failed = %v, want empty", path, f)
+		}
+	}
+
+	// svc2's params gain a typo: the file no longer validates, so no routine
+	// can (re)start, while running ones carry on.
+	h.writeConfig(configYAML("svc1") + `  - name: svc2
+    host: 127.0.0.1
+    check_type: tcp_connect
+    interval_seconds: 1
+    points_per_failure: 10
+    params: {prot: 9}
+`)
+	svc1Running := func() bool {
+		status := h.do(http.MethodGet, "/status", "", "").object(t)
+		return serviceIn(t, status, "svc1")["routine_enabled"] == true
+	}
+	wantFailure := func(r response, status int, what string) {
+		t.Helper()
+		h.mustStatus(r, status, what)
+		out := r.object(t)
+		if msg := failedList(t, out)["svc2"]; !strings.Contains(msg, "prot") {
+			t.Errorf("%s: failed = %v, want svc2 with the config error naming prot", what, out["failed"])
+		}
+		if !svc1Running() {
+			t.Errorf("%s: svc1 stopped running", what)
+		}
+	}
+
+	t.Run("restart", func(t *testing.T) {
+		r := h.do(http.MethodPost, "/services/svc2/restart", token, `{"pause_scoring":true}`)
+		wantFailure(r, http.StatusInternalServerError, "restart")
+		if msg, _ := r.object(t)["error"].(string); !strings.Contains(msg, "svc2") {
+			t.Errorf("restart error = %q, want it to name svc2", msg)
+		}
+		if !h.service("svc2").ScoringPaused {
+			t.Error("restart failed to start the routine but should still have applied the pause")
+		}
+	})
+	t.Run("engine start", func(t *testing.T) {
+		// svc2 is enabled but stopped after the failed restart.
+		r := h.do(http.MethodPost, "/engine/start", token, "")
+		wantFailure(r, http.StatusOK, "engine start")
+		if out := r.object(t); out["engine_state"] != "running" {
+			t.Errorf("engine start = %v, want the status alongside the failures", out)
+		}
+	})
+	t.Run("service start", func(t *testing.T) {
+		wantFailure(h.do(http.MethodPost, "/services/svc2/start", token, ""), http.StatusInternalServerError, "service start")
+	})
+	t.Run("reload", func(t *testing.T) {
+		// The broken file itself fails the reload before any change.
+		r := h.do(http.MethodPost, "/reload", token, "")
+		h.mustStatus(r, http.StatusInternalServerError, "reload of an invalid file")
+		if out := r.object(t); len(failedList(t, out)) != 0 || out["error"] == nil {
+			t.Errorf("invalid reload = %v, want an error and an empty failed list", out)
+		}
+		// A valid file whose new service cannot start (no http check is
+		// registered here) is applied, with the failure reported.
+		h.writeConfig(configYAML("svc1", "svc2") + `  - name: svc3
+    host: 127.0.0.1
+    check_type: http
+    interval_seconds: 1
+    points_per_failure: 10
+    params: {port: 80}
+`)
+		r = h.do(http.MethodPost, "/reload", token, "")
+		h.mustStatus(r, http.StatusOK, "reload adding svc3")
+		out := r.object(t)
+		if fmt.Sprint(out["added"]) != "[svc3]" || !strings.Contains(failedList(t, out)["svc3"], "http") {
+			t.Errorf("reload = %v, want svc3 added and reported as failed to start", out)
+		}
+		if !svc1Running() {
+			t.Error("svc1 stopped running")
+		}
+	})
 }
 
 func TestReload_EmptyConfigPathUsesEngineDefault(t *testing.T) {
