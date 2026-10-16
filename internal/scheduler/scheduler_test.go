@@ -76,7 +76,7 @@ func serviceYAML(name string, intervalSeconds, pointsPerFailure int) string {
     check_type: tcp_connect
     interval_seconds: %d
     points_per_failure: %d
-    params: {}
+    params: {port: 9}
 `, name, intervalSeconds, pointsPerFailure)
 }
 

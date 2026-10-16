@@ -6,13 +6,59 @@
 // persistence: each one receives a host and its raw params map and reports a
 // Result. Malformed params produce a failed Result whose Detail names the
 // offending param; a plugin never panics on bad input.
+//
+// Each built-in plugin parses its params with one function, which both the
+// plugin (at every check) and ValidateParams (at config load) call, so what
+// the config accepts and what the plugin can run cannot drift apart.
 package checks
 
 import (
 	"context"
 	"fmt"
+	"maps"
+	"slices"
+	"strings"
 	"sync"
 )
+
+// builtin is one check type the engine ships: its implementation and the
+// validator for its params, which wraps the same parser the implementation
+// uses.
+type builtin struct {
+	check    CheckFunc
+	validate func(params map[string]any) error
+}
+
+// builtins maps each shipped check type name to its plugin.
+var builtins = map[string]builtin{
+	"tcp_connect": {
+		check:    TCPConnect,
+		validate: func(p map[string]any) error { _, err := parseTCPConnectParams(p); return err },
+	},
+	"http": {
+		check:    HTTP,
+		validate: func(p map[string]any) error { _, err := parseHTTPParams(p); return err },
+	},
+}
+
+// BuiltinTypes returns the names of the check types the engine ships, sorted.
+// The config validates check_type against this list.
+func BuiltinTypes() []string {
+	return slices.Sorted(maps.Keys(builtins))
+}
+
+// ValidateParams reports whether params are valid for the built-in check type
+// checkType: every required param present, every param of the right type and
+// range, and no params the type does not know (a misspelled optional param
+// would otherwise be silently ignored). The error names the offending param
+// and what it must be; it does not name the service, which the caller adds.
+func ValidateParams(checkType string, params map[string]any) error {
+	b, ok := builtins[checkType]
+	if !ok {
+		return fmt.Errorf("unknown check type %q (known: %s)", checkType, strings.Join(BuiltinTypes(), ", "))
+	}
+	return b.validate(params)
+}
 
 // Result is the outcome of one check attempt.
 type Result struct {
@@ -56,8 +102,9 @@ func (r *Registry) Get(name string) (CheckFunc, bool) {
 // (tcp_connect and http) already registered.
 func NewDefaultRegistry() *Registry {
 	r := NewRegistry()
-	r.Register("tcp_connect", TCPConnect)
-	r.Register("http", HTTP)
+	for name, b := range builtins {
+		r.Register(name, b.check)
+	}
 	return r
 }
 
@@ -96,6 +143,25 @@ func stringParam(params map[string]any, key string) (s string, ok bool, err erro
 		return "", true, fmt.Errorf("param %q must be a string, got %T", key, v)
 	}
 	return s, true, nil
+}
+
+// rejectUnknownParams fails if params has any key not in allowed.
+func rejectUnknownParams(params map[string]any, allowed ...string) error {
+	var unknown []string
+	for key := range params {
+		if !slices.Contains(allowed, key) {
+			unknown = append(unknown, key)
+		}
+	}
+	if len(unknown) == 0 {
+		return nil
+	}
+	slices.Sort(unknown)
+	quoted := make([]string, len(unknown))
+	for i, key := range unknown {
+		quoted[i] = fmt.Sprintf("%q", key)
+	}
+	return fmt.Errorf("unknown param %s (allowed: %s)", strings.Join(quoted, ", "), strings.Join(allowed, ", "))
 }
 
 // paramPort reads the required "port" param and checks it is a valid TCP

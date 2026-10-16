@@ -44,7 +44,7 @@ func svcYAML(name string, pointsPerFailure int) string {
     check_type: tcp_connect
     interval_seconds: 1
     points_per_failure: %d
-    params: {}
+    params: {port: 9}
 `, name, pointsPerFailure)
 }
 

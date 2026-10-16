@@ -22,6 +22,8 @@ import (
 
 	"golang.org/x/crypto/bcrypt"
 	"gopkg.in/yaml.v3"
+
+	"github.com/Bravo-CDT/Scoring/internal/checks"
 )
 
 // ErrServiceNotFound is returned by LoadService, wrapped, when the config
@@ -30,10 +32,10 @@ import (
 // failure, which must not be treated as a deletion.
 var ErrServiceNotFound = errors.New("config: service not found")
 
-// knownCheckTypes are the check implementations the engine ships; see
-// internal/checks. Validating here means a typo'd check_type fails at startup
-// instead of at the first tick.
-var knownCheckTypes = []string{"http", "tcp_connect"}
+// knownCheckTypes returns the check types the engine ships, straight from
+// internal/checks so the two lists cannot diverge. Validating here means a
+// typo'd check_type fails at startup instead of at the first tick.
+func knownCheckTypes() []string { return checks.BuiltinTypes() }
 
 // ServiceConfig is one scored service.
 type ServiceConfig struct {
@@ -173,8 +175,13 @@ func validate(cfg *Config) error {
 		if svc.Host == "" {
 			return fmt.Errorf("service %q: host is required", svc.Name)
 		}
-		if !slices.Contains(knownCheckTypes, svc.CheckType) {
-			return fmt.Errorf("service %q: unknown check_type %q (known: %v)", svc.Name, svc.CheckType, knownCheckTypes)
+		if known := knownCheckTypes(); !slices.Contains(known, svc.CheckType) {
+			return fmt.Errorf("service %q: unknown check_type %q (known: %v)", svc.Name, svc.CheckType, known)
+		}
+		// The same parser the check runs with, so a param the check would
+		// reject at every tick is refused here instead.
+		if err := checks.ValidateParams(svc.CheckType, svc.Params); err != nil {
+			return fmt.Errorf("service %q: params: %w", svc.Name, err)
 		}
 		if svc.IntervalSeconds <= 0 {
 			return fmt.Errorf("service %q: interval_seconds must be a positive integer, got %d", svc.Name, svc.IntervalSeconds)

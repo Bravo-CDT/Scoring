@@ -3,6 +3,7 @@ package checks
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -24,9 +25,12 @@ const maxHTTPHeaderBytes = 64 * 1024
 //   - port (int, required): TCP port, 1-65535.
 //   - path (string, optional, default "/"): request path, which may include a
 //     query string; must start with "/".
-//   - expect_status (int, optional, default 200): required status code.
+//   - expect_status (int, optional, default 200): required status code,
+//     100-599.
 //   - expect_contains (string, optional): if non-empty, the first
 //     maxHTTPBodyBytes of the body must contain it.
+//
+// Any other param is rejected.
 //
 // Redirects are not followed: the scored service is judged on its own
 // response, so a redirect only passes when expect_status names that code.
@@ -36,33 +40,12 @@ func HTTP(ctx context.Context, host string, params map[string]any) Result {
 	if err := checkHost(host); err != nil {
 		return fail("%v", err)
 	}
-	port, err := paramPort(params)
-	if err != nil {
-		return fail("%v", err)
-	}
-	path, ok, err := stringParam(params, "path")
-	if err != nil {
-		return fail("%v", err)
-	}
-	if !ok {
-		path = "/"
-	}
-	if !strings.HasPrefix(path, "/") {
-		return fail("param %q must start with \"/\", got %q", "path", path)
-	}
-	expectStatus, ok, err := intParam(params, "expect_status")
-	if err != nil {
-		return fail("%v", err)
-	}
-	if !ok {
-		expectStatus = http.StatusOK
-	}
-	expectContains, _, err := stringParam(params, "expect_contains")
+	p, err := parseHTTPParams(params)
 	if err != nil {
 		return fail("%v", err)
 	}
 
-	url := "http://" + net.JoinHostPort(host, strconv.Itoa(port)) + path
+	url := "http://" + net.JoinHostPort(host, strconv.Itoa(p.port)) + p.path
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return fail("building request for %s: %v", url, err)
@@ -88,19 +71,69 @@ func HTTP(ctx context.Context, host string, params map[string]any) Result {
 	}
 	defer resp.Body.Close()
 
-	if int64(resp.StatusCode) != expectStatus {
-		return fail("status %d, want %d", resp.StatusCode, expectStatus)
+	if resp.StatusCode != p.expectStatus {
+		return fail("status %d, want %d", resp.StatusCode, p.expectStatus)
 	}
-	if expectContains != "" {
+	if p.expectContains != "" {
 		body, err := io.ReadAll(io.LimitReader(resp.Body, maxHTTPBodyBytes))
 		if err != nil {
 			return fail("reading response body: %v", err)
 		}
-		if !bytes.Contains(body, []byte(expectContains)) {
+		if !bytes.Contains(body, []byte(p.expectContains)) {
 			// Deliberately doesn't echo expectContains: Detail may be shown
 			// publicly, and that string is exactly what red team would want.
 			return fail("response did not contain expected content")
 		}
 	}
 	return Result{Success: true, Detail: "status " + strconv.Itoa(resp.StatusCode)}
+}
+
+// httpParams is HTTP's parsed params, with defaults applied.
+type httpParams struct {
+	port           int
+	path           string
+	expectStatus   int
+	expectContains string
+}
+
+// parseHTTPParams parses and validates HTTP's params. It is the only place
+// they are checked, for ValidateParams and the check alike.
+func parseHTTPParams(params map[string]any) (httpParams, error) {
+	if err := rejectUnknownParams(params, "port", "path", "expect_status", "expect_contains"); err != nil {
+		return httpParams{}, err
+	}
+	port, err := paramPort(params)
+	if err != nil {
+		return httpParams{}, err
+	}
+	path, ok, err := stringParam(params, "path")
+	if err != nil {
+		return httpParams{}, err
+	}
+	if !ok {
+		path = "/"
+	}
+	if !strings.HasPrefix(path, "/") {
+		return httpParams{}, fmt.Errorf("param %q must start with \"/\", got %q", "path", path)
+	}
+	expectStatus, ok, err := intParam(params, "expect_status")
+	if err != nil {
+		return httpParams{}, err
+	}
+	if !ok {
+		expectStatus = http.StatusOK
+	}
+	if expectStatus < 100 || expectStatus > 599 {
+		return httpParams{}, fmt.Errorf("param %q must be between 100 and 599, got %d", "expect_status", expectStatus)
+	}
+	expectContains, _, err := stringParam(params, "expect_contains")
+	if err != nil {
+		return httpParams{}, err
+	}
+	return httpParams{
+		port:           port,
+		path:           path,
+		expectStatus:   int(expectStatus),
+		expectContains: expectContains,
+	}, nil
 }

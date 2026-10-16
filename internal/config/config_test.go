@@ -4,10 +4,13 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
 	"golang.org/x/crypto/bcrypt"
+
+	"github.com/Bravo-CDT/Scoring/internal/checks"
 )
 
 // hashEnvVar is the environment variable the test fixtures interpolate the
@@ -56,7 +59,7 @@ services:
 `
 
 // minimalYAML is the smallest valid config: no mass_failure_fraction, one
-// service with no params.
+// service with only its required param.
 const minimalYAML = `
 session_name: "minimal"
 starting_score: 500
@@ -69,6 +72,7 @@ services:
     check_type: tcp_connect
     interval_seconds: 60
     points_per_failure: 10
+    params: {port: 22}
 `
 
 // writeTemp writes contents to a config.yaml in a per-test temp dir and
@@ -186,11 +190,96 @@ func TestLoad_MinimalConfig(t *testing.T) {
 	if cfg.MassFailureFraction != nil {
 		t.Errorf("MassFailureFraction = %v, want nil when mass_failure_fraction is omitted", *cfg.MassFailureFraction)
 	}
-	if cfg.Services[0].Params == nil {
-		t.Error("Params = nil, want a non-nil empty map when params is omitted")
+	if port, _ := cfg.Services[0].Params["port"].(int); port != 22 || len(cfg.Services[0].Params) != 1 {
+		t.Errorf("Params = %v, want just port 22", cfg.Services[0].Params)
 	}
-	if len(cfg.Services[0].Params) != 0 {
-		t.Errorf("Params = %v, want empty", cfg.Services[0].Params)
+}
+
+// Every shipped check type requires a param today, so an omitted params block
+// cannot pass validation; normalize still guarantees consumers a non-nil map.
+func TestNormalize_OmittedParamsBecomeEmptyMap(t *testing.T) {
+	cfg := Config{Services: []ServiceConfig{{Name: "svc1"}}}
+	normalize(&cfg)
+	if cfg.Services[0].Params == nil || len(cfg.Services[0].Params) != 0 {
+		t.Errorf("Params = %#v, want a non-nil empty map", cfg.Services[0].Params)
+	}
+}
+
+// The config accepts exactly the check types the checks package ships.
+func TestKnownCheckTypesMatchChecksPackage(t *testing.T) {
+	if got, want := knownCheckTypes(), checks.BuiltinTypes(); !slices.Equal(got, want) {
+		t.Errorf("knownCheckTypes() = %v, want %v", got, want)
+	}
+}
+
+// Check params are validated at load, per check type, so a typo fails at
+// startup (or on /reload) rather than as a failing check that costs the blue
+// team points. Each error names the service and the param.
+func TestLoad_InvalidParams(t *testing.T) {
+	// httpYAML is minimalYAML with svc1 turned into an http check carrying
+	// the given params block.
+	httpYAML := func(params string) string {
+		y := strings.Replace(minimalYAML, "check_type: tcp_connect", "check_type: http", 1)
+		return strings.Replace(y, "params: {port: 22}", "params: "+params, 1)
+	}
+	tcpYAML := func(params string) string {
+		return strings.Replace(minimalYAML, "params: {port: 22}", "params: "+params, 1)
+	}
+	tests := []struct {
+		name    string
+		yaml    string
+		mention []string
+	}{
+		{"params omitted", strings.Replace(minimalYAML, "    params: {port: 22}\n", "", 1), []string{`"port"`, "missing"}},
+		{"missing port", tcpYAML("{}"), []string{`"port"`, "missing"}},
+		{"misspelled port", tcpYAML("{prot: 22}"), []string{`"prot"`, "unknown"}},
+		{"port zero", tcpYAML("{port: 0}"), []string{`"port"`, "between 1 and 65535"}},
+		{"port too large", tcpYAML("{port: 70000}"), []string{`"port"`, "between 1 and 65535"}},
+		{"port not an int", tcpYAML(`{port: "22"}`), []string{`"port"`, "integer", "string"}},
+		{"port is a float", tcpYAML("{port: 22.5}"), []string{`"port"`, "integer"}},
+		{"http expect_contain typo", httpYAML("{port: 80, expect_contain: Welcome}"), []string{`"expect_contain"`, "unknown"}},
+		{"http missing port", httpYAML("{path: /}"), []string{`"port"`, "missing"}},
+		{"http relative path", httpYAML("{port: 80, path: index.html}"), []string{`"path"`, `"/"`}},
+		{"http path not a string", httpYAML("{port: 80, path: 5}"), []string{`"path"`, "string"}},
+		{"http expect_status out of range", httpYAML("{port: 80, expect_status: 700}"), []string{`"expect_status"`, "between 100 and 599"}},
+		{"http expect_status not an int", httpYAML(`{port: 80, expect_status: "200"}`), []string{`"expect_status"`, "integer"}},
+		{"http expect_contains not a string", httpYAML("{port: 80, expect_contains: 7}"), []string{`"expect_contains"`, "string"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			setHash(t)
+			_, err := Load(writeTemp(t, tt.yaml))
+			if err == nil {
+				t.Fatal("expected error, got nil")
+			}
+			for _, m := range append([]string{`service "svc1"`}, tt.mention...) {
+				if !strings.Contains(err.Error(), m) {
+					t.Errorf("error = %q, want it to mention %s", err, m)
+				}
+			}
+		})
+	}
+}
+
+// LoadService validates the whole file, so one service's bad params make every
+// lookup fail rather than letting the scheduler start the others on a config
+// that startup would have refused.
+func TestLoadService_RejectsInvalidParams(t *testing.T) {
+	setHash(t)
+	bad := validYAML + `
+  - name: broken
+    host: 10.0.3.1
+    check_type: tcp_connect
+    interval_seconds: 30
+    points_per_failure: 5
+    params: {prot: 23}
+`
+	_, err := LoadService(writeTemp(t, bad), "telnet-win")
+	if err == nil || !strings.Contains(err.Error(), `service "broken"`) || !strings.Contains(err.Error(), `"prot"`) {
+		t.Fatalf("LoadService error = %v, want one naming service broken and param prot", err)
+	}
+	if errors.Is(err, ErrServiceNotFound) {
+		t.Errorf("error = %v, want a validation error distinct from ErrServiceNotFound", err)
 	}
 }
 
@@ -431,6 +520,9 @@ func TestLoadService_InvalidConfigIsNotServiceNotFound(t *testing.T) {
 	_, err := LoadService(writeTemp(t, bad), "svc1")
 	if err == nil {
 		t.Fatal("expected error for invalid config, got nil")
+	}
+	if !strings.Contains(err.Error(), "not_a_real_check") {
+		t.Errorf("error = %v, want it to name the unknown check type", err)
 	}
 	if errors.Is(err, ErrServiceNotFound) {
 		t.Errorf("error = %v, want a validation error distinct from ErrServiceNotFound", err)

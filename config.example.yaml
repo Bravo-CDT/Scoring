@@ -47,16 +47,18 @@ admin:
 #
 # check_type is one of:
 #   tcp_connect  succeeds if a TCP connection to host:port opens.
-#                params: port (required)
+#                params: port (required, integer 1-65535)
 #   http         plain-HTTP GET; succeeds on the expected status (and body).
-#                params: port (required), path (default "/"),
-#                expect_status (default 200), expect_contains (optional
+#                params: port (required, integer 1-65535), path (string
+#                starting with "/", default "/"), expect_status (integer
+#                100-599, default 200), expect_contains (optional string;
 #                substring of the first 64 KiB of the body).
 #                Redirects are NOT followed: a 301/302 is judged as-is, so
 #                it passes only if expect_status names that code.
-# Params are not validated at startup: a misspelled param is ignored (its
-# default applies) and a bad value makes every check fail with a message
-# naming the param, visible to the admin in /services/<name>/results.
+# Params are validated per check type at startup and on /reload: a missing
+# required param, a value of the wrong type or range, or a param the check
+# type does not know (e.g. a misspelled "expect_contain") is an error naming
+# the service and the param, and the config is refused.
 services:
   - name: web
     host: 10.0.0.10

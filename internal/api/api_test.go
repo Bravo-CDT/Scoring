@@ -58,7 +58,7 @@ services:
     check_type: tcp_connect
     interval_seconds: 1
     points_per_failure: 10
-    params: {}
+    params: {port: 9}
 `, n)
 	}
 	return b.String()
