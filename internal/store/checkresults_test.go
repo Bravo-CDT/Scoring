@@ -692,10 +692,18 @@ func TestPerServiceLatestQueriesUseTheServiceIndex(t *testing.T) {
 		name  string
 		query string
 		args  []any
+		// allowTopLevelSort is true only for the one query (ActiveServiceOutcomes)
+		// whose plan legitimately sorts a handful of per-service result rows at
+		// the top level. GetLatestCheckResult and CountConsecutiveFailures query
+		// a single service directly and must need no sort anywhere in their
+		// plan — a top-level sort there would mean check_results rows
+		// themselves are being sorted instead of answered straight from the
+		// index, which is exactly the regression this test exists to catch.
+		allowTopLevelSort bool
 	}{
-		{"GetLatestCheckResult", latestCheckResultSQL, []any{1}},
-		{"CountConsecutiveFailures", consecutiveFailuresSQL, []any{1, 1}},
-		{"ActiveServiceOutcomes", activeServiceOutcomesSQL, []any{1}},
+		{"GetLatestCheckResult", latestCheckResultSQL, []any{1}, false},
+		{"CountConsecutiveFailures", consecutiveFailuresSQL, []any{1, 1}, false},
+		{"ActiveServiceOutcomes", activeServiceOutcomesSQL, []any{1}, true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -709,8 +717,12 @@ func TestPerServiceLatestQueriesUseTheServiceIndex(t *testing.T) {
 						t.Errorf("check_results step %q: want a SEARCH using idx_check_results_service", s.detail)
 					}
 				}
-				if strings.Contains(s.detail, "TEMP B-TREE") && s.parent != 0 {
-					t.Errorf("sort inside a subquery: %q (plan %+v)", s.detail, plan)
+				if strings.Contains(s.detail, "TEMP B-TREE") {
+					isSubquerySort := s.parent != 0
+					isDisallowedTopLevelSort := s.parent == 0 && !tt.allowTopLevelSort
+					if isSubquerySort || isDisallowedTopLevelSort {
+						t.Errorf("unexpected sort: %q (plan %+v)", s.detail, plan)
+					}
 				}
 			}
 			if !sawCheckResults {
