@@ -46,7 +46,7 @@ type LedgerEntry struct {
 }
 
 // rowQuerier is the QueryRow method *sql.DB and *sql.Tx have in common, so the
-// balance query can run inside RecordLedgerEntry's transaction or on its own.
+// balance helpers are not tied to RecordLedgerEntry's transaction.
 type rowQuerier interface {
 	QueryRow(query string, args ...any) *sql.Row
 }
@@ -128,17 +128,28 @@ func (s *Store) RecordLedgerEntry(sessionID int64, sourceType string, sourceRef 
 // side. It sums both directions per side, so it needs no change when sources
 // that move points from red to blue are added.
 //
+// Both balances come from one SELECT, so they are read from the same snapshot:
+// a transfer committed by another goroutine is either in both or in neither,
+// and blue+red always equals the starting score. Two separate reads would let
+// a transfer land between them on the shared connection.
+//
 // An unknown session yields an error wrapping sql.ErrNoRows.
 func (s *Store) GetScore(sessionID int64) (blue, red int, err error) {
-	startingScore, err := sessionStartingScore(s.db, sessionID)
+	err = s.db.QueryRow(
+		`SELECT sv.starting_score + COALESCE(SUM(
+		            (CASE WHEN le.to_side   = ? THEN le.points ELSE 0 END)
+		          - (CASE WHEN le.from_side = ? THEN le.points ELSE 0 END)), 0),
+		        COALESCE(SUM(
+		            (CASE WHEN le.to_side   = ? THEN le.points ELSE 0 END)
+		          - (CASE WHEN le.from_side = ? THEN le.points ELSE 0 END)), 0)
+		 FROM sessions sv
+		 LEFT JOIN ledger_entries le ON le.session_id = sv.id AND le.voided = FALSE
+		 WHERE sv.id = ?
+		 GROUP BY sv.id`,
+		SideBlue, SideBlue, SideRed, SideRed, sessionID,
+	).Scan(&blue, &red)
 	if err != nil {
-		return 0, 0, err
-	}
-	if blue, err = sideBalance(s.db, sessionID, SideBlue, startingScore); err != nil {
-		return 0, 0, err
-	}
-	if red, err = sideBalance(s.db, sessionID, SideRed, startingScore); err != nil {
-		return 0, 0, err
+		return 0, 0, fmt.Errorf("store: loading score of session %d: %w", sessionID, err)
 	}
 	return blue, red, nil
 }

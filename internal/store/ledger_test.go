@@ -345,6 +345,54 @@ func TestRecordLedgerEntry_ConcurrentCallsNeverOverdraw(t *testing.T) {
 	}
 }
 
+// GetScore must read both balances from one snapshot: points only ever move
+// between the sides, so a reader that saw a transfer land between its blue
+// and red reads would report points that exist on neither side, or on both.
+func TestGetScore_IsConsistentUnderConcurrentWrites(t *testing.T) {
+	const (
+		startingScore = 100_000
+		writers       = 4
+		perWriter     = 100
+	)
+	st := openTemp(t)
+	sess := ledgerSession(t, st, startingScore)
+
+	var wg sync.WaitGroup
+	for w := range writers {
+		wg.Go(func() {
+			for i := range perWriter {
+				ref := int64(w*perWriter + i + 1)
+				if _, err := st.RecordLedgerEntry(sess.ID, "service_check", ref, SideBlue, SideRed, 7, "load"); err != nil {
+					t.Errorf("RecordLedgerEntry(%d): %v", ref, err)
+					return
+				}
+			}
+		})
+	}
+	done := make(chan struct{})
+	go func() { wg.Wait(); close(done) }()
+
+	// Poll until the writers finish, stopping at the first bad read; the
+	// writers are always waited for so none outlives the test.
+	for reads := 0; ; reads++ {
+		blue, red, err := st.GetScore(sess.ID)
+		if err != nil {
+			t.Errorf("GetScore: %v", err)
+			break
+		}
+		if blue+red != startingScore {
+			t.Errorf("read %d: blue=%d red=%d sum to %d, want %d", reads, blue, red, blue+red, startingScore)
+			break
+		}
+		select {
+		case <-done:
+			return
+		default:
+		}
+	}
+	<-done
+}
+
 func TestGetScore_NoEntriesYet(t *testing.T) {
 	st := openTemp(t)
 	sess := ledgerSession(t, st, 1000)
