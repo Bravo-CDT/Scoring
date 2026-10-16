@@ -60,7 +60,9 @@ type Engine struct {
 	scheduler  *scheduler.Scheduler
 	configPath string
 
-	// mu serializes the control operations (everything but Status) and guards
+	// mu serializes the control operations (everything but Status and the
+	// scoring pause/resume levers, which must stay usable while another
+	// operation is stuck; see setGlobalScoringPaused) and guards
 	// desiredEnabled. Serializing is what keeps each operation's
 	// check-then-act sound: Stop cannot interleave with a StartService that
 	// has already seen the engine running and so leave a routine running
@@ -164,10 +166,13 @@ func (e *Engine) ResumeScoring() error {
 	return e.setGlobalScoringPaused(false, EventScoringResumed, "global scoring resumed")
 }
 
+// setGlobalScoringPaused deliberately does not take mu: pausing scoring is the
+// admin's emergency lever and must work even while another control operation
+// is stuck in mu (say, a StopService waiting on a check that ignores
+// cancellation). It needs no serialization — it is one write of a single
+// last-writer-wins flag, read fresh by the scorer on every result, and no
+// control operation checks it before acting — plus an event.
 func (e *Engine) setGlobalScoringPaused(paused bool, eventType, message string) error {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-
 	if err := e.store.SetGlobalScoringPaused(paused); err != nil {
 		return fmt.Errorf("engine: %s: %w", message, err)
 	}
@@ -273,10 +278,14 @@ func (e *Engine) ResumeServiceScoring(name string) error {
 	return e.setServiceScoringPaused(name, false, EventServiceScoringResumed, "scoring resumed")
 }
 
+// setServiceScoringPaused does not take mu, for the same reason as
+// setGlobalScoringPaused: the per-service pause is a single last-writer-wins
+// flag read fresh by the scorer, so racing a RestartService (which may set the
+// same flag) or a Reload is harmless, and the lever must not wait behind a
+// stuck control operation. The lookup needs only the store. If a Reload
+// retires the service concurrently, the flag is still written to its row,
+// which keeps it for a later reactivation, exactly as if the pause came first.
 func (e *Engine) setServiceScoringPaused(name string, paused bool, eventType, what string) error {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-
 	svc, err := e.lookup(name)
 	if err != nil {
 		return err
