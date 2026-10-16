@@ -168,6 +168,33 @@ func (s *Store) ListCheckResults(serviceID int64, limit int, beforeID int64) ([]
 	return out, nil
 }
 
+// CountActiveServiceOutcomes reports how many services in the session are
+// active and how many of those are currently failing, meaning their most
+// recent check result (by the same timestamp-then-id order as
+// GetLatestCheckResult) is a failure.
+//
+// The denominator is every active service, including ones that have not
+// reported yet; such a service counts as not failing, because "no result yet"
+// is unknown rather than down. Dividing only by services that have reported
+// would make the first failure of a competition look like 100% of services
+// down. Inactive services are excluded from both counts.
+func (s *Store) CountActiveServiceOutcomes(sessionID int64) (active, failing int, err error) {
+	err = s.db.QueryRow(
+		`SELECT COUNT(*), COALESCE(SUM(
+		     (SELECT cr.success = 0 FROM check_results cr
+		      WHERE cr.session_id = sv.session_id AND cr.service_id = sv.id
+		      ORDER BY cr.timestamp DESC, cr.id DESC LIMIT 1)
+		 ), 0)
+		 FROM services sv
+		 WHERE sv.session_id = ? AND sv.active = 1`,
+		sessionID,
+	).Scan(&active, &failing)
+	if err != nil {
+		return 0, 0, fmt.Errorf("store: counting active service outcomes in session %d: %w", sessionID, err)
+	}
+	return active, failing, nil
+}
+
 // timestampMillis is how every timestamp reaches the database: Unix
 // milliseconds, with the zero time meaning now.
 func timestampMillis(ts time.Time) int64 {

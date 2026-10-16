@@ -19,8 +19,8 @@ var ErrDuplicateSourceRef = errors.New("store: ledger entry already recorded for
 // The two sides of a competition. Only blue starts with points (the session's
 // starting score); red holds only what it has taken from blue.
 const (
-	sideBlue = "blue"
-	sideRed  = "red"
+	SideBlue = "blue"
+	SideRed  = "red"
 )
 
 // LedgerEntry is one point transfer between sides. The ledger is append-only
@@ -134,10 +134,10 @@ func (s *Store) GetScore(sessionID int64) (blue, red int, err error) {
 	if err != nil {
 		return 0, 0, err
 	}
-	if blue, err = sideBalance(s.db, sessionID, sideBlue, startingScore); err != nil {
+	if blue, err = sideBalance(s.db, sessionID, SideBlue, startingScore); err != nil {
 		return 0, 0, err
 	}
-	if red, err = sideBalance(s.db, sessionID, sideRed, startingScore); err != nil {
+	if red, err = sideBalance(s.db, sessionID, SideRed, startingScore); err != nil {
 		return 0, 0, err
 	}
 	return blue, red, nil
@@ -172,7 +172,7 @@ func sideBalance(q rowQuerier, sessionID int64, side string, startingScore int) 
 	if err != nil {
 		return 0, fmt.Errorf("store: summing ledger for %s in session %d: %w", side, sessionID, err)
 	}
-	if side == sideBlue {
+	if side == SideBlue {
 		net += startingScore
 	}
 	return net, nil
