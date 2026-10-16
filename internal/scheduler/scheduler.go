@@ -45,15 +45,15 @@ type Scheduler struct {
 	sink       ResultSink
 	configPath string
 
-	// stagger picks the delay before a routine's first check.
-	stagger func() time.Duration
 	// intervalUnit is the length of one configured interval_second. Always
 	// time.Second outside tests.
 	intervalUnit time.Duration
 
-	// mu guards routines and opLocks. It is only ever held briefly: never
-	// across config loading or while waiting for a routine to exit.
-	mu       sync.Mutex
+	// mu guards stagger, routines and opLocks. It is only ever held briefly:
+	// never across config loading or while waiting for a routine to exit.
+	mu sync.Mutex
+	// stagger picks the delay before a routine's first check.
+	stagger  func() time.Duration
 	routines map[int64]*routine
 	// opLocks serializes Start/Stop/Restart per service ID, so a
 	// check-then-launch or a stop-then-wait is atomic with respect to other
@@ -68,11 +68,31 @@ func New(registry *checks.Registry, sink ResultSink, configPath string) *Schedul
 		registry:     registry,
 		sink:         sink,
 		configPath:   configPath,
-		stagger:      func() time.Duration { return rand.N(maxStagger) },
+		stagger:      randomStagger(maxStagger),
 		intervalUnit: time.Second,
 		routines:     make(map[int64]*routine),
 		opLocks:      make(map[int64]*sync.Mutex),
 	}
+}
+
+// SetMaxStagger changes the bound on the random delay before each newly
+// started routine's first check (5s by default); zero or less removes the
+// delay. It is a tuning and test hook — packages built on the Scheduler use it
+// to make their tests' first checks immediate — and is safe to call at any
+// time. Routines already started keep the delay they drew.
+func (s *Scheduler) SetMaxStagger(limit time.Duration) {
+	s.mu.Lock()
+	s.stagger = randomStagger(limit)
+	s.mu.Unlock()
+}
+
+// randomStagger returns a delay picker uniform over [0, limit), or one that
+// always returns 0 for a non-positive limit.
+func randomStagger(limit time.Duration) func() time.Duration {
+	if limit <= 0 {
+		return func() time.Duration { return 0 }
+	}
+	return func() time.Duration { return rand.N(limit) }
 }
 
 // StartService is idempotent: if serviceID is already running, it's a no-op.
@@ -157,10 +177,11 @@ func (s *Scheduler) start(serviceID int64, name string) error {
 	ctx, cancel := context.WithCancel(context.Background())
 	r := &routine{cancel: cancel, done: make(chan struct{})}
 	s.mu.Lock()
+	delay := s.stagger()
 	s.routines[serviceID] = r
 	s.mu.Unlock()
 
-	go s.run(ctx, r.done, serviceID, *cfg, fn)
+	go s.run(ctx, r.done, delay, serviceID, *cfg, fn)
 	return nil
 }
 
@@ -180,11 +201,12 @@ func (s *Scheduler) stop(serviceID int64) {
 	s.mu.Unlock()
 }
 
-// run is one service's loop. It returns only when ctx is cancelled.
-func (s *Scheduler) run(ctx context.Context, done chan<- struct{}, serviceID int64, cfg config.ServiceConfig, fn checks.CheckFunc) {
+// run is one service's loop: it waits out the startup stagger delay, then
+// checks once per interval. It returns only when ctx is cancelled.
+func (s *Scheduler) run(ctx context.Context, done chan<- struct{}, delay time.Duration, serviceID int64, cfg config.ServiceConfig, fn checks.CheckFunc) {
 	defer close(done)
 
-	if !sleep(ctx, s.stagger()) {
+	if !sleep(ctx, delay) {
 		return
 	}
 	interval := time.Duration(cfg.IntervalSeconds) * s.intervalUnit

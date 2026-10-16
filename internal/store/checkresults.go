@@ -168,6 +168,34 @@ func (s *Store) ListCheckResults(serviceID int64, limit int, beforeID int64) ([]
 	return out, nil
 }
 
+// CountConsecutiveFailures returns how many of the service's most recent check
+// results are failures in an unbroken run, meaning the number of failures
+// after its latest success (by the timestamp-then-id order of
+// GetLatestCheckResult), or all of its failures if it has never succeeded. A
+// service with no results, or whose latest result succeeded, has 0.
+//
+// It is counted in SQL rather than by walking the history newest-first, so the
+// cost does not depend on reading a long failure streak row by row.
+func (s *Store) CountConsecutiveFailures(serviceID int64) (int, error) {
+	var count int
+	err := s.db.QueryRow(
+		`WITH last_success AS (
+		     SELECT timestamp, id FROM check_results
+		     WHERE service_id = ? AND success = 1
+		     `+newestFirst+` LIMIT 1
+		 )
+		 SELECT COUNT(*) FROM check_results
+		 WHERE service_id = ? AND success = 0
+		   AND (NOT EXISTS (SELECT 1 FROM last_success)
+		        OR (timestamp, id) > (SELECT timestamp, id FROM last_success))`,
+		serviceID, serviceID,
+	).Scan(&count)
+	if err != nil {
+		return 0, fmt.Errorf("store: counting consecutive failures for service %d: %w", serviceID, err)
+	}
+	return count, nil
+}
+
 // CountActiveServiceOutcomes reports how many services in the session are
 // active and how many of those are currently failing, meaning their most
 // recent check result (by the same timestamp-then-id order as

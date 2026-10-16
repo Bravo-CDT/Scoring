@@ -513,3 +513,71 @@ func TestInsertConfigSnapshot_UnknownServiceFails(t *testing.T) {
 		t.Error("InsertConfigSnapshot for a nonexistent service succeeded, want foreign-key violation")
 	}
 }
+
+func TestGetServiceByName_NotFoundDoesNotCreate(t *testing.T) {
+	st := openTemp(t)
+	sess := newSession(t, st, "comp-1")
+
+	_, found, err := st.GetServiceByName(sess.ID, "ghost")
+	if err != nil {
+		t.Fatalf("GetServiceByName: %v", err)
+	}
+	if found {
+		t.Fatal("expected found=false for an unknown name")
+	}
+
+	var count int
+	if err := st.db.QueryRow(`SELECT COUNT(*) FROM services`).Scan(&count); err != nil {
+		t.Fatalf("counting services: %v", err)
+	}
+	if count != 0 {
+		t.Errorf("GetServiceByName must not create a row; found %d services", count)
+	}
+}
+
+func TestGetServiceByName_Found(t *testing.T) {
+	st := openTemp(t)
+	sess := newSession(t, st, "comp-1")
+	created := newService(t, st, sess.ID, "apache-web")
+
+	svc, found, err := st.GetServiceByName(sess.ID, "apache-web")
+	if err != nil || !found {
+		t.Fatalf("GetServiceByName: svc=%+v found=%v err=%v", svc, found, err)
+	}
+	if !reflect.DeepEqual(svc, created) {
+		t.Errorf("GetServiceByName = %+v, want %+v", svc, created)
+	}
+}
+
+func TestGetServiceByName_ReturnsInactiveServices(t *testing.T) {
+	st := openTemp(t)
+	sess := newSession(t, st, "comp-1")
+	created := newService(t, st, sess.ID, "apache-web")
+	if err := st.SetServiceActive(created.ID, false); err != nil {
+		t.Fatalf("SetServiceActive: %v", err)
+	}
+
+	// A retired service still exists; what inactive means is the caller's call.
+	svc, found, err := st.GetServiceByName(sess.ID, "apache-web")
+	if err != nil || !found {
+		t.Fatalf("GetServiceByName: svc=%+v found=%v err=%v", svc, found, err)
+	}
+	if svc.Active {
+		t.Error("Active = true, want false")
+	}
+}
+
+func TestGetServiceByName_ScopedToSession(t *testing.T) {
+	st := openTemp(t)
+	a := newSession(t, st, "comp-a")
+	b := newSession(t, st, "comp-b")
+	newService(t, st, a.ID, "apache-web")
+
+	_, found, err := st.GetServiceByName(b.ID, "apache-web")
+	if err != nil {
+		t.Fatalf("GetServiceByName: %v", err)
+	}
+	if found {
+		t.Error("found a service from another session")
+	}
+}
