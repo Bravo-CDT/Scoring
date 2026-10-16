@@ -107,6 +107,13 @@ func (s *Scheduler) StartService(serviceID int64, name string) error {
 // StopService is idempotent and synchronous: it blocks until the routine's
 // goroutine has fully exited before returning. A check in flight when Stop is
 // called is cancelled and its result discarded.
+//
+// Because it waits for the routine, it returns only once the in-flight
+// CheckFunc honours its cancelled ctx; a check that ignores ctx holds it up
+// until the check returns on its own. For the same reason the ResultSink must
+// never call StopService or RestartService for the service whose result it is
+// recording: that call runs on the routine's own goroutine and would wait
+// forever for itself to exit.
 func (s *Scheduler) StopService(serviceID int64) {
 	unlock := s.lockService(serviceID)
 	defer unlock()
@@ -117,6 +124,10 @@ func (s *Scheduler) StopService(serviceID int64) {
 // re-reading the config file — this is how a config edit takes effect. If the
 // fresh config cannot be loaded, the service is left stopped and the error is
 // returned.
+//
+// Its stop half blocks exactly as StopService does: until the in-flight
+// CheckFunc honours ctx, and forever if called by the ResultSink for the
+// service it is recording.
 func (s *Scheduler) RestartService(serviceID int64, name string) error {
 	unlock := s.lockService(serviceID)
 	defer unlock()
