@@ -160,8 +160,9 @@ sleep 4; st                      # dns listed, "up":false, losing 1 point per ch
 ```
 
 Now a typo. Config is validated as a whole, so the bad entry is refused
-everywhere it would be loaded and reported in the response (running routines
-are left alone):
+everywhere it would be loaded and reported in the response (the dns restart
+below stops its own routine on failure, as a restart always does; every
+*other* already-running routine is left alone):
 
 ```sh
 sed -i 's/{port: 18084}/{prot: 18084}/' "$W/config.yaml"
@@ -220,15 +221,21 @@ tail -2 "$W/engine.log"              # ... shutdown complete
 
 start_engine
 st
-# "engine_state":"stopped","scoring_paused":true, same blue_score/red_score,
-# api still "scoring_paused":true, every "routine_enabled":false
+# "engine_state":"stopped","scoring_paused":true, blue_score/red_score close to
+# what step 10 noted (a check or two may have landed between the resume and the
+# kill above, so don't expect an exact match), api still "scoring_paused":true,
+# every "routine_enabled":false
 evs 2
 # {"type":"process_started","actor":"system","message":"scoring engine process started for session \"hand-test\"; ..."}
 # {"type":"engine_stopped","actor":"system","message":"engine stopped"}
 adm /engine/start                   # {"error":"missing or invalid bearer token"}  HTTP 401: tokens do not survive a restart
 ```
 
-Log in again and `POST /engine/start` and `/scoring/resume` to carry on.
+Log in again and `POST /engine/start` and `/scoring/resume` to carry on. If a
+service was still down across the restart, don't expect an immediate
+mass-failure autopause: a freshly started process's autopause logic starts
+disarmed (see step 9) and only arms once it has seen the failing share dip
+below the configured threshold, then fires on the next crossing above it.
 
 ## 11. Clean up
 
