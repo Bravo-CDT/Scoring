@@ -90,6 +90,38 @@ const newestFirst = `ORDER BY timestamp DESC, id DESC`
 // it backwards).
 const lastInserted = `ORDER BY id DESC`
 
+// The per-service "latest" queries. They run on every check result (the
+// scorer's mass-failure check reads every service's latest outcome each
+// time), so each is written to be answered from idx_check_results_service —
+// whose entries are (service_id, rowid), already in lastInserted order —
+// reading only the newest rows rather than sorting or scanning a service's
+// whole history. TestPerServiceLatestQueriesUseTheServiceIndex pins the plans.
+const (
+	latestCheckResultSQL = `SELECT ` + checkResultColumns + ` FROM check_results
+		 WHERE service_id = ? ` + lastInserted + ` LIMIT 1`
+
+	// The failures after the newest success: the subquery walks the index
+	// backwards and stops at the first success, and the count is a range
+	// scan from there.
+	consecutiveFailuresSQL = `SELECT COUNT(*) FROM check_results
+		 WHERE service_id = ? AND success = 0
+		   AND id > COALESCE(
+		       (SELECT id FROM check_results WHERE service_id = ? AND success = 1
+		        ` + lastInserted + ` LIMIT 1), 0)`
+
+	// The subquery matches on service_id alone (a service belongs to exactly
+	// one session); also matching session_id would steer the planner to the
+	// (session_id, service_id, timestamp) index, which then has to sort each
+	// service's whole history by id.
+	activeServiceOutcomesSQL = `SELECT sv.id, COALESCE(
+		     (SELECT cr.success = 0 FROM check_results cr
+		      WHERE cr.service_id = sv.id
+		      ` + lastInserted + ` LIMIT 1), FALSE)
+		 FROM services sv
+		 WHERE sv.session_id = ? AND sv.active = 1
+		 ORDER BY sv.id`
+)
+
 // scanCheckResult reads one checkResultColumns row. Its error is returned
 // unwrapped so callers can recognise sql.ErrNoRows.
 func scanCheckResult(sc rowScanner) (CheckResult, error) {
@@ -132,11 +164,7 @@ func (s *Store) InsertCheckResult(cr CheckResult) (int64, error) {
 // before its first check runs — so "no result yet" is an ordinary answer
 // rather than an error.
 func (s *Store) GetLatestCheckResult(serviceID int64) (*CheckResult, error) {
-	row := s.db.QueryRow(
-		`SELECT `+checkResultColumns+` FROM check_results
-		 WHERE service_id = ? `+lastInserted+` LIMIT 1`,
-		serviceID,
-	)
+	row := s.db.QueryRow(latestCheckResultSQL, serviceID)
 	switch cr, err := scanCheckResult(row); {
 	case errors.Is(err, sql.ErrNoRows):
 		return nil, nil
@@ -190,13 +218,7 @@ func (s *Store) ListCheckResults(serviceID int64, limit int, beforeID int64) ([]
 // cost does not depend on reading a long failure streak row by row.
 func (s *Store) CountConsecutiveFailures(serviceID int64) (int, error) {
 	var count int
-	err := s.db.QueryRow(
-		`SELECT COUNT(*) FROM check_results
-		 WHERE service_id = ? AND success = 0
-		   AND id > COALESCE(
-		       (SELECT MAX(id) FROM check_results WHERE service_id = ? AND success = 1), 0)`,
-		serviceID, serviceID,
-	).Scan(&count)
+	err := s.db.QueryRow(consecutiveFailuresSQL, serviceID, serviceID).Scan(&count)
 	if err != nil {
 		return 0, fmt.Errorf("store: counting consecutive failures for service %d: %w", serviceID, err)
 	}
@@ -222,16 +244,7 @@ type ServiceOutcome struct {
 // service rather than two counts so the caller can narrow the set further
 // (the scorer keeps only services whose routine is running).
 func (s *Store) ActiveServiceOutcomes(sessionID int64) ([]ServiceOutcome, error) {
-	rows, err := s.db.Query(
-		`SELECT sv.id, COALESCE(
-		     (SELECT cr.success = 0 FROM check_results cr
-		      WHERE cr.session_id = sv.session_id AND cr.service_id = sv.id
-		      `+lastInserted+` LIMIT 1), FALSE)
-		 FROM services sv
-		 WHERE sv.session_id = ? AND sv.active = 1
-		 ORDER BY sv.id`,
-		sessionID,
-	)
+	rows, err := s.db.Query(activeServiceOutcomesSQL, sessionID)
 	if err != nil {
 		return nil, fmt.Errorf("store: listing active service outcomes in session %d: %w", sessionID, err)
 	}
