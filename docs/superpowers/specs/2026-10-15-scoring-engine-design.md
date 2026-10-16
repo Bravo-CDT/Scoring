@@ -384,11 +384,14 @@ control, consistent with "config governs behavior, restart applies it."
 
 - **`sessions`** — `id, name, starting_score, created_at`.
 - **`services`** — `id, session_id, name, active, created_at`. Surrogate
-  `id` is the stable identity referenced everywhere else; `name` is a
-  mutable display label. Renaming a service in config does not orphan its
-  history (it's the same `services` row, same `id`); removing a service
-  (via `/reload`) sets `active=false` but keeps the row and all its
-  history.
+  `id` is what every other table references, but a service's identity is
+  `(session_id, name)`: config has no other key to match on. Renaming a
+  service in config is therefore a remove plus an add — the old name's
+  history stays under the old (now inactive) row, the new name starts a
+  fresh row, and a service whose scoring was paused comes back unpaused
+  under its new name. Removing a service (via `/reload`) sets
+  `active=false` but keeps the row and all its history; re-adding the
+  same name reactivates that row.
 - **`service_config_snapshots`** — `id, service_id, applied_at, host,
   check_type, interval_seconds, points_per_failure, params_json`. Written
   every time a routine (re)starts. Answers "what was this service's
