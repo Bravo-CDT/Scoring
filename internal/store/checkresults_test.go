@@ -479,3 +479,79 @@ func lastBytes(s string, n int) string {
 	}
 	return s[len(s)-n:]
 }
+
+func TestCountActiveServiceOutcomes(t *testing.T) {
+	st := openTemp(t)
+	sess, err := st.GetOrCreateSession("comp-1", 1000)
+	if err != nil {
+		t.Fatalf("GetOrCreateSession: %v", err)
+	}
+	mustService := func(sessionID int64, name string) int64 {
+		t.Helper()
+		svc, err := st.GetOrCreateService(sessionID, name)
+		if err != nil {
+			t.Fatalf("GetOrCreateService(%q): %v", name, err)
+		}
+		return svc.ID
+	}
+	record := func(sessionID, serviceID int64, ts time.Time, success bool) {
+		t.Helper()
+		if _, err := st.InsertCheckResult(CheckResult{
+			SessionID: sessionID, ServiceID: serviceID, Timestamp: ts, Success: success,
+		}); err != nil {
+			t.Fatalf("InsertCheckResult: %v", err)
+		}
+	}
+
+	base := time.Date(2026, 10, 15, 12, 0, 0, 0, time.UTC)
+	svcA := mustService(sess.ID, "svc-a") // down then up: latest is up
+	svcB := mustService(sess.ID, "svc-b") // down: latest is down
+	svcC := mustService(sess.ID, "svc-c") // down but inactive: excluded entirely
+	mustService(sess.ID, "svc-d")         // active, never reported: counted, not failing
+	svcE := mustService(sess.ID, "svc-e") // up, then a down row with an earlier timestamp
+	if err := st.SetServiceActive(svcC, false); err != nil {
+		t.Fatalf("SetServiceActive: %v", err)
+	}
+
+	record(sess.ID, svcA, base, false)
+	record(sess.ID, svcA, base.Add(time.Second), true)
+	record(sess.ID, svcB, base, false)
+	record(sess.ID, svcC, base, false)
+	// Inserted out of timestamp order: "latest" follows the timestamp (as
+	// GetLatestCheckResult does), not the row id, so svc-e's latest is up.
+	record(sess.ID, svcE, base.Add(time.Second), true)
+	record(sess.ID, svcE, base, false)
+
+	// A failing service in another session must not leak into these counts.
+	other, err := st.GetOrCreateSession("comp-2", 1000)
+	if err != nil {
+		t.Fatalf("GetOrCreateSession(comp-2): %v", err)
+	}
+	record(other.ID, mustService(other.ID, "svc-x"), base, false)
+
+	active, failing, err := st.CountActiveServiceOutcomes(sess.ID)
+	if err != nil {
+		t.Fatalf("CountActiveServiceOutcomes: %v", err)
+	}
+	if active != 4 {
+		t.Errorf("active = %d, want 4 (a, b, d, e; inactive c excluded, unreported d included)", active)
+	}
+	if failing != 1 {
+		t.Errorf("failing = %d, want 1 (only svc-b's latest result is a failure)", failing)
+	}
+}
+
+func TestCountActiveServiceOutcomes_NoServices(t *testing.T) {
+	st := openTemp(t)
+	sess, err := st.GetOrCreateSession("comp-1", 1000)
+	if err != nil {
+		t.Fatalf("GetOrCreateSession: %v", err)
+	}
+	active, failing, err := st.CountActiveServiceOutcomes(sess.ID)
+	if err != nil {
+		t.Fatalf("CountActiveServiceOutcomes: %v", err)
+	}
+	if active != 0 || failing != 0 {
+		t.Errorf("active=%d failing=%d, want 0/0", active, failing)
+	}
+}
