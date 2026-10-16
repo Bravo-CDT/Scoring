@@ -503,6 +503,36 @@ func TestRecord_MassFailureResumeIsNotOverridden(t *testing.T) {
 	}
 }
 
+// A crossing that happens while an admin has scoring paused is consumed: the
+// admin is already looking, and resuming during that same mass failure is the
+// same judgment call as resuming after an autopause, so it must not be
+// overridden either.
+func TestRecord_MassFailureCrossingDuringManualPauseIsConsumed(t *testing.T) {
+	st, sess := openTestStore(t, 1000)
+	svcA := newService(t, st, sess.ID, "svc-a")
+	svcB := newService(t, st, sess.ID, "svc-b")
+	sc := New(st, sess.ID, fraction(0.5))
+
+	record(t, sc, svcB.ID, 10, pass) // arms
+	if err := st.SetGlobalScoringPaused(true); err != nil { // the admin's manual pause
+		t.Fatalf("SetGlobalScoringPaused(true): %v", err)
+	}
+	record(t, sc, svcA.ID, 10, fail) // 1 of 2 while paused: the crossing
+	if err := st.SetGlobalScoringPaused(false); err != nil { // the admin resumes
+		t.Fatalf("SetGlobalScoringPaused(false): %v", err)
+	}
+
+	record(t, sc, svcA.ID, 10, fail)
+	record(t, sc, svcB.ID, 10, fail) // 2 of 2, still above the threshold
+	if scoringPaused(t, st) {
+		t.Fatal("autopaused after the admin resumed from a manual pause during the same mass failure")
+	}
+	wantScore(t, st, sess.ID, 980, 20) // only the two post-resume failures
+	if n := countEvents(t, st, sess.ID, EventMassFailureAutopause); n != 0 {
+		t.Errorf("mass_failure_autopause events = %d, want 0", n)
+	}
+}
+
 // A Scorer that first sees the session already above the threshold — a
 // restart in the middle of a sweep the admin may already have judged genuine —
 // has seen no crossing, so it must not fire until it has seen the share below

@@ -219,9 +219,11 @@ func (sc *Scorer) scoreFailure(svc store.Service, resultID int64, pointsPerFailu
 // so a restart in the middle of a mass failure (when the store forces scoring
 // paused and an admin must resume it) does not count as a crossing either.
 //
-// While scoring is already paused it does not fire and stays armed: an
-// admin's own pause is left alone and the warning is not repeated, but a
-// crossing that happened under that pause still fires once the admin resumes.
+// A crossing seen while scoring is already paused (an admin's manual pause)
+// is consumed: it disarms without an event or any state change. The admin's
+// pause is left alone, and an admin who resumes during that same mass failure
+// has made the same call as one resuming after an autopause, so it is not
+// overridden either.
 func (sc *Scorer) checkMassFailure() error {
 	if sc.massFailureFraction == nil {
 		return nil
@@ -251,6 +253,7 @@ func (sc *Scorer) checkMassFailure() error {
 		return fmt.Errorf("scorer: loading run state for mass-failure check: %w", err)
 	}
 	if rs.ScoringPaused {
+		sc.armed = false
 		return nil
 	}
 	if err := sc.store.SetGlobalScoringPaused(true); err != nil {
