@@ -1,6 +1,7 @@
 package store
 
 import (
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -500,7 +501,7 @@ func lastBytes(s string, n int) string {
 	return s[len(s)-n:]
 }
 
-func TestCountActiveServiceOutcomes(t *testing.T) {
+func TestActiveServiceOutcomes(t *testing.T) {
 	st := openTemp(t)
 	sess, err := st.GetOrCreateSession("comp-1", 1000)
 	if err != nil {
@@ -527,7 +528,7 @@ func TestCountActiveServiceOutcomes(t *testing.T) {
 	svcA := mustService(sess.ID, "svc-a") // down then up: latest is up
 	svcB := mustService(sess.ID, "svc-b") // down: latest is down
 	svcC := mustService(sess.ID, "svc-c") // down but inactive: excluded entirely
-	mustService(sess.ID, "svc-d")         // active, never reported: counted, not failing
+	svcD := mustService(sess.ID, "svc-d") // active, never reported: listed, not failing
 	svcE := mustService(sess.ID, "svc-e") // up, then down with an earlier timestamp: down
 	if err := st.SetServiceActive(svcC, false); err != nil {
 		t.Fatalf("SetServiceActive: %v", err)
@@ -549,30 +550,35 @@ func TestCountActiveServiceOutcomes(t *testing.T) {
 	}
 	record(other.ID, mustService(other.ID, "svc-x"), base, false)
 
-	active, failing, err := st.CountActiveServiceOutcomes(sess.ID)
+	got, err := st.ActiveServiceOutcomes(sess.ID)
 	if err != nil {
-		t.Fatalf("CountActiveServiceOutcomes: %v", err)
+		t.Fatalf("ActiveServiceOutcomes: %v", err)
 	}
-	if active != 4 {
-		t.Errorf("active = %d, want 4 (a, b, d, e; inactive c excluded, unreported d included)", active)
+	// a, b, d, e in id order: inactive c excluded, unreported d included as
+	// not failing, svc-b and svc-e failing.
+	want := []ServiceOutcome{
+		{ServiceID: svcA, Failing: false},
+		{ServiceID: svcB, Failing: true},
+		{ServiceID: svcD, Failing: false},
+		{ServiceID: svcE, Failing: true},
 	}
-	if failing != 2 {
-		t.Errorf("failing = %d, want 2 (svc-b and svc-e's latest results are failures)", failing)
+	if !slices.Equal(got, want) {
+		t.Errorf("ActiveServiceOutcomes = %+v, want %+v", got, want)
 	}
 }
 
-func TestCountActiveServiceOutcomes_NoServices(t *testing.T) {
+func TestActiveServiceOutcomes_NoServices(t *testing.T) {
 	st := openTemp(t)
 	sess, err := st.GetOrCreateSession("comp-1", 1000)
 	if err != nil {
 		t.Fatalf("GetOrCreateSession: %v", err)
 	}
-	active, failing, err := st.CountActiveServiceOutcomes(sess.ID)
+	got, err := st.ActiveServiceOutcomes(sess.ID)
 	if err != nil {
-		t.Fatalf("CountActiveServiceOutcomes: %v", err)
+		t.Fatalf("ActiveServiceOutcomes: %v", err)
 	}
-	if active != 0 || failing != 0 {
-		t.Errorf("active=%d failing=%d, want 0/0", active, failing)
+	if len(got) != 0 {
+		t.Errorf("ActiveServiceOutcomes = %+v, want none", got)
 	}
 }
 
