@@ -203,31 +203,52 @@ func (s *Store) CountConsecutiveFailures(serviceID int64) (int, error) {
 	return count, nil
 }
 
-// CountActiveServiceOutcomes reports how many services in the session are
-// active and how many of those are currently failing, meaning their most
-// recent check result (by the same insert order as GetLatestCheckResult) is a
-// failure.
+// ServiceOutcome is one active service's current state for the mass-failure
+// check: whether its most recent check result is a failure.
+type ServiceOutcome struct {
+	ServiceID int64
+	// Failing is true when the latest result (by the same insert order as
+	// GetLatestCheckResult) is a failure. A service with no result yet is
+	// not failing: "no result yet" is unknown, not down.
+	Failing bool
+}
+
+// ActiveServiceOutcomes returns the current outcome of every active service in
+// the session, in service id order. Inactive services are left out.
 //
-// The denominator is every active service, including ones that have not
-// reported yet; such a service counts as not failing, because "no result yet"
-// is unknown rather than down. Dividing only by services that have reported
-// would make the first failure of a competition look like 100% of services
-// down. Inactive services are excluded from both counts.
-func (s *Store) CountActiveServiceOutcomes(sessionID int64) (active, failing int, err error) {
-	err = s.db.QueryRow(
-		`SELECT COUNT(*), COALESCE(SUM(
+// Services that have not reported yet are included (as not failing), so a
+// caller dividing failures by the number of services does not mistake the
+// first failure of a competition for 100% of services down. It returns every
+// service rather than two counts so the caller can narrow the set further
+// (the scorer keeps only services whose routine is running).
+func (s *Store) ActiveServiceOutcomes(sessionID int64) ([]ServiceOutcome, error) {
+	rows, err := s.db.Query(
+		`SELECT sv.id, COALESCE(
 		     (SELECT cr.success = 0 FROM check_results cr
 		      WHERE cr.session_id = sv.session_id AND cr.service_id = sv.id
-		      ORDER BY cr.id DESC LIMIT 1)
-		 ), 0)
+		      `+lastInserted+` LIMIT 1), FALSE)
 		 FROM services sv
-		 WHERE sv.session_id = ? AND sv.active = 1`,
+		 WHERE sv.session_id = ? AND sv.active = 1
+		 ORDER BY sv.id`,
 		sessionID,
-	).Scan(&active, &failing)
+	)
 	if err != nil {
-		return 0, 0, fmt.Errorf("store: counting active service outcomes in session %d: %w", sessionID, err)
+		return nil, fmt.Errorf("store: listing active service outcomes in session %d: %w", sessionID, err)
 	}
-	return active, failing, nil
+	defer rows.Close()
+
+	var out []ServiceOutcome
+	for rows.Next() {
+		var o ServiceOutcome
+		if err := rows.Scan(&o.ServiceID, &o.Failing); err != nil {
+			return nil, fmt.Errorf("store: scanning service outcome row: %w", err)
+		}
+		out = append(out, o)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("store: listing active service outcomes in session %d: %w", sessionID, err)
+	}
+	return out, nil
 }
 
 // timestampMillis is how every timestamp reaches the database: Unix

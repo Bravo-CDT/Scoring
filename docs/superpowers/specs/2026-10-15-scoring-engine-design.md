@@ -314,6 +314,14 @@ action across all ten boxes, which is a judgment call either way), and
 call `POST /scoring/resume` once satisfied. Leaving `mass_failure_fraction`
 unset disables this feature entirely.
 
+The share counts only active services whose routine is running (a stopped
+routine's last result is stale); a service with no result yet counts as
+not failing. The trigger is edge-based: it fires when the share crosses
+the threshold from below, so an admin's resume during the same ongoing
+mass failure is not overridden — the share must first drop below the
+threshold and cross again. A freshly started engine has seen no crossing
+yet, so it fires only after observing the share below the threshold.
+
 ## Data model
 
 ### Config (`config.yaml`)
