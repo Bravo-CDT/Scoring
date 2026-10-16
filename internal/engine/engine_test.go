@@ -547,6 +547,78 @@ func TestPauseAndResumeScoring(t *testing.T) {
 	}
 }
 
+// TestScoringPausesNotBlockedByStuckControlOp: pausing scoring is the admin's
+// emergency lever, so it must work even while another control operation is
+// stuck — here a StopService waiting on a check that ignores cancellation.
+func TestScoringPausesNotBlockedByStuckControlOp(t *testing.T) {
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	unblock := func() { releaseOnce.Do(func() { close(release) }) }
+	inCheck := make(chan struct{}, 1)
+	stuckCheck := func(context.Context, string, map[string]any) checks.Result {
+		select {
+		case inCheck <- struct{}{}:
+		default:
+		}
+		<-release // deliberately ignores ctx
+		return checks.Result{Success: true}
+	}
+	h := newHarness(t, stuckCheck, "svc1")
+	// Runs before the harness's e.Stop cleanup, which would otherwise hang.
+	t.Cleanup(unblock)
+
+	mustDo(t, "Start", h.e.Start())
+	select {
+	case <-inCheck:
+	case <-time.After(waitTimeout):
+		t.Fatal("check never started")
+	}
+
+	stopDone := make(chan error, 1)
+	go func() { stopDone <- h.e.StopService("svc1") }()
+	// Wait until StopService holds the control lock (and is stuck in it).
+	waitFor(t, "StopService to hold the control lock", func() bool {
+		if h.e.mu.TryLock() {
+			h.e.mu.Unlock()
+			return false
+		}
+		return true
+	})
+
+	ops := []struct {
+		name string
+		call func() error
+	}{
+		{"PauseScoring", h.e.PauseScoring},
+		{"ResumeScoring", h.e.ResumeScoring},
+		{"PauseServiceScoring", func() error { return h.e.PauseServiceScoring("svc1") }},
+		{"ResumeServiceScoring", func() error { return h.e.ResumeServiceScoring("svc1") }},
+	}
+	for _, op := range ops {
+		done := make(chan error, 1)
+		go func() { done <- op.call() }()
+		select {
+		case err := <-done:
+			mustDo(t, op.name, err)
+		case <-time.After(2 * time.Second):
+			t.Fatalf("%s blocked behind a stuck control operation", op.name)
+		}
+	}
+	select {
+	case <-stopDone:
+		t.Fatal("StopService finished before the check was released; the test proved nothing")
+	default:
+	}
+
+	unblock()
+	select {
+	case err := <-stopDone:
+		mustDo(t, "StopService", err)
+	case <-time.After(waitTimeout):
+		t.Fatal("StopService did not finish after the check was released")
+	}
+}
+
 func TestFailuresScoreOnlyAfterResumeScoring(t *testing.T) {
 	h := newHarness(t, failCheck, "svc1")
 	mustDo(t, "Start", h.e.Start())
