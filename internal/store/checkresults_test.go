@@ -651,6 +651,75 @@ func TestCountConsecutiveFailures_IsScopedToOneService(t *testing.T) {
 	}
 }
 
+// planStep is one row of EXPLAIN QUERY PLAN output.
+type planStep struct {
+	id, parent int
+	detail     string
+}
+
+func explainPlan(t *testing.T, st *Store, query string, args ...any) []planStep {
+	t.Helper()
+	rows, err := st.db.Query("EXPLAIN QUERY PLAN "+query, args...)
+	if err != nil {
+		t.Fatalf("EXPLAIN QUERY PLAN: %v", err)
+	}
+	defer rows.Close()
+	var plan []planStep
+	for rows.Next() {
+		var s planStep
+		var notUsed int
+		if err := rows.Scan(&s.id, &s.parent, &notUsed, &s.detail); err != nil {
+			t.Fatalf("scanning plan row: %v", err)
+		}
+		plan = append(plan, s)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("reading plan: %v", err)
+	}
+	return plan
+}
+
+// The per-service "latest" queries run on every check result (the scorer's
+// mass-failure check reads every service's latest outcome each time), so
+// their cost must not grow with the length of the history. This pins it
+// without timing anything: every read of check_results must be an index
+// SEARCH on the service id, and no sort may run over check_results rows
+// (the only sort allowed is the outcomes query's top-level ordering of the
+// handful of service rows).
+func TestPerServiceLatestQueriesUseTheServiceIndex(t *testing.T) {
+	st := openTemp(t)
+	tests := []struct {
+		name  string
+		query string
+		args  []any
+	}{
+		{"GetLatestCheckResult", latestCheckResultSQL, []any{1}},
+		{"CountConsecutiveFailures", consecutiveFailuresSQL, []any{1, 1}},
+		{"ActiveServiceOutcomes", activeServiceOutcomesSQL, []any{1}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			plan := explainPlan(t, st, tt.query, tt.args...)
+			sawCheckResults := false
+			for _, s := range plan {
+				if strings.Contains(s.detail, "check_results") || strings.Contains(s.detail, " cr ") ||
+					strings.HasSuffix(s.detail, " cr") {
+					sawCheckResults = true
+					if !strings.HasPrefix(s.detail, "SEARCH") || !strings.Contains(s.detail, "idx_check_results_service ") {
+						t.Errorf("check_results step %q: want a SEARCH using idx_check_results_service", s.detail)
+					}
+				}
+				if strings.Contains(s.detail, "TEMP B-TREE") && s.parent != 0 {
+					t.Errorf("sort inside a subquery: %q (plan %+v)", s.detail, plan)
+				}
+			}
+			if !sawCheckResults {
+				t.Fatalf("plan never reads check_results: %+v", plan)
+			}
+		})
+	}
+}
+
 // insertOutcomeAt records one check result with the given outcome and
 // timestamp.
 func insertOutcomeAt(t *testing.T, st *Store, sessionID, serviceID int64, ts time.Time, success bool) {

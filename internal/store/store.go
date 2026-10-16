@@ -75,6 +75,11 @@ CREATE TABLE IF NOT EXISTS check_results (
 );
 CREATE INDEX IF NOT EXISTS idx_check_results_service_ts
 	ON check_results(session_id, service_id, timestamp DESC);
+-- Serves the per-service "latest" queries: its entries are (service_id, rowid),
+-- so a service's newest results are read straight off its end. IF NOT EXISTS
+-- adds it to an existing database on the next Open.
+CREATE INDEX IF NOT EXISTS idx_check_results_service
+	ON check_results(service_id);
 
 CREATE TABLE IF NOT EXISTS ledger_entries (
 	id             INTEGER PRIMARY KEY AUTOINCREMENT,
