@@ -143,6 +143,26 @@ func TestGetLatestCheckResult_BreaksMillisecondTiesByID(t *testing.T) {
 	}
 }
 
+// A backward clock step (NTP correction, VM resume) gives the newer row an
+// earlier timestamp. "Latest" is causal order, which the row id records,
+// because one routine per service inserts its results one at a time.
+func TestGetLatestCheckResult_FollowsInsertOrderAcrossClockStep(t *testing.T) {
+	st := openTemp(t)
+	sessionID, serviceID := setupServiceForResults(t, st, "apache-web")
+
+	base := time.UnixMilli(1_700_000_000_000).UTC()
+	insertResultAt(t, st, sessionID, serviceID, base)
+	newest := insertResultAt(t, st, sessionID, serviceID, base.Add(-time.Hour))
+
+	latest, err := st.GetLatestCheckResult(serviceID)
+	if err != nil {
+		t.Fatalf("GetLatestCheckResult: %v", err)
+	}
+	if latest == nil || latest.ID != newest {
+		t.Errorf("GetLatestCheckResult = %+v, want the last-inserted row %d", latest, newest)
+	}
+}
+
 func TestInsertCheckResult_TruncatesOversizedDetail(t *testing.T) {
 	st := openTemp(t)
 	sessionID, serviceID := setupServiceForResults(t, st, "apache-web")
@@ -508,7 +528,7 @@ func TestCountActiveServiceOutcomes(t *testing.T) {
 	svcB := mustService(sess.ID, "svc-b") // down: latest is down
 	svcC := mustService(sess.ID, "svc-c") // down but inactive: excluded entirely
 	mustService(sess.ID, "svc-d")         // active, never reported: counted, not failing
-	svcE := mustService(sess.ID, "svc-e") // up, then a down row with an earlier timestamp
+	svcE := mustService(sess.ID, "svc-e") // up, then down with an earlier timestamp: down
 	if err := st.SetServiceActive(svcC, false); err != nil {
 		t.Fatalf("SetServiceActive: %v", err)
 	}
@@ -517,8 +537,8 @@ func TestCountActiveServiceOutcomes(t *testing.T) {
 	record(sess.ID, svcA, base.Add(time.Second), true)
 	record(sess.ID, svcB, base, false)
 	record(sess.ID, svcC, base, false)
-	// Inserted out of timestamp order: "latest" follows the timestamp (as
-	// GetLatestCheckResult does), not the row id, so svc-e's latest is up.
+	// Inserted out of timestamp order (a backward clock step): "latest"
+	// follows insert order, as GetLatestCheckResult does, so svc-e is down.
 	record(sess.ID, svcE, base.Add(time.Second), true)
 	record(sess.ID, svcE, base, false)
 
@@ -536,8 +556,8 @@ func TestCountActiveServiceOutcomes(t *testing.T) {
 	if active != 4 {
 		t.Errorf("active = %d, want 4 (a, b, d, e; inactive c excluded, unreported d included)", active)
 	}
-	if failing != 1 {
-		t.Errorf("failing = %d, want 1 (only svc-b's latest result is a failure)", failing)
+	if failing != 2 {
+		t.Errorf("failing = %d, want 2 (svc-b and svc-e's latest results are failures)", failing)
 	}
 }
 
@@ -587,29 +607,27 @@ func TestCountConsecutiveFailures(t *testing.T) {
 	}
 }
 
-func TestCountConsecutiveFailures_OrdersByTimestampThenID(t *testing.T) {
+// The streak follows insert order (the row id), not the timestamp, so a
+// backward clock step cannot reorder a service's history.
+func TestCountConsecutiveFailures_FollowsInsertOrderAcrossClockStep(t *testing.T) {
 	st := openTemp(t)
 	sessionID, serviceID := setupServiceForResults(t, st, "svc")
 	base := time.Date(2026, 10, 15, 12, 0, 0, 0, time.UTC)
 
-	// Written out of timestamp order: the success at base+2s is the most
-	// recent success even though a failure with an earlier timestamp was
-	// written after it. The two failures at base+3s tie on timestamp and
-	// both count.
-	insertOutcomeAt(t, st, sessionID, serviceID, base.Add(2*time.Second), true)
-	insertOutcomeAt(t, st, sessionID, serviceID, base.Add(1*time.Second), false)
-	insertOutcomeAt(t, st, sessionID, serviceID, base.Add(3*time.Second), false)
-	insertOutcomeAt(t, st, sessionID, serviceID, base.Add(3*time.Second), false)
+	// The clock steps back an hour after the success: the two failures written
+	// after it carry earlier timestamps but are still the newest results.
+	insertOutcomeAt(t, st, sessionID, serviceID, base, true)
+	insertOutcomeAt(t, st, sessionID, serviceID, base.Add(-time.Hour), false)
+	insertOutcomeAt(t, st, sessionID, serviceID, base.Add(-time.Hour), false)
 
 	if got, err := st.CountConsecutiveFailures(serviceID); err != nil || got != 2 {
 		t.Errorf("CountConsecutiveFailures = %d, %v; want 2", got, err)
 	}
 
-	// A success in the same millisecond as those failures, written last, wins
-	// the id tiebreak and ends the streak.
-	insertOutcomeAt(t, st, sessionID, serviceID, base.Add(3*time.Second), true)
+	// A success written last ends the streak whatever its timestamp says.
+	insertOutcomeAt(t, st, sessionID, serviceID, base.Add(-2*time.Hour), true)
 	if got, err := st.CountConsecutiveFailures(serviceID); err != nil || got != 0 {
-		t.Errorf("after tied success: CountConsecutiveFailures = %d, %v; want 0", got, err)
+		t.Errorf("after the last success: CountConsecutiveFailures = %d, %v; want 0", got, err)
 	}
 }
 
