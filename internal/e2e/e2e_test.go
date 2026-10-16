@@ -416,6 +416,27 @@ func TestEndToEnd_LifecycleAndRestart(t *testing.T) {
 	if !hasEvent(events, "engine_started") || !hasEvent(events, "service_removed") {
 		t.Fatalf("after restart: event history lacks the earlier engine_started and the startup service_removed: %v", events)
 	}
+	// Everything the second boot did on its own is the system's doing, not an
+	// admin's: events are newest first, so the boot's own events lead the list
+	// up to and including its process_started.
+	sawProcessStarted := false
+	for _, ev := range events {
+		if ev["actor"] != "system" {
+			t.Errorf("second boot's startup event %v: actor %v, want system", ev["type"], ev["actor"])
+		}
+		if ev["type"] == "process_started" {
+			sawProcessStarted = true
+			break
+		}
+	}
+	if !sawProcessStarted {
+		t.Fatalf("after restart: no process_started event for the second boot: %v", events)
+	}
+	for _, typ := range []string{"service_removed", "config_reloaded"} {
+		if ev := firstEvent(events, typ); ev == nil || ev["actor"] != "system" {
+			t.Errorf("after restart: newest %s = %v, want one by system", typ, ev)
+		}
+	}
 
 	if code := s2.do(http.MethodPost, "/engine/start", token, nil, nil); code != http.StatusUnauthorized {
 		t.Fatalf("old token on the new process: status %d, want 401", code)
@@ -437,12 +458,71 @@ func TestEndToEnd_LifecycleAndRestart(t *testing.T) {
 }
 
 func hasEvent(events []map[string]any, eventType string) bool {
+	return firstEvent(events, eventType) != nil
+}
+
+// firstEvent returns the first event of eventType in events (the newest, as
+// /events lists newest first), or nil.
+func firstEvent(events []map[string]any, eventType string) map[string]any {
 	for _, ev := range events {
 		if ev["type"] == eventType {
-			return true
+			return ev
 		}
 	}
-	return false
+	return nil
+}
+
+func countEvents(events []map[string]any, eventType string) int {
+	n := 0
+	for _, ev := range events {
+		if ev["type"] == eventType {
+			n++
+		}
+	}
+	return n
+}
+
+// TestEndToEnd_BootAndShutdownEvents checks how the process itself shows up
+// in the event log: one process_started per boot, the startup sync and the
+// shutdown stop attributed to the system rather than an admin, and no
+// config_reloaded noise from a boot whose config changed nothing.
+func TestEndToEnd_BootAndShutdownEvents(t *testing.T) {
+	setAdminHash(t)
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "scoring.db")
+	configPath := filepath.Join(dir, "config.yaml")
+	writeConfig(t, configPath, "svc1")
+
+	s1 := newStack(t, dbPath, configPath)
+	s1.admin(s1.login(), "/engine/start")
+	s1.close() // shuts down a running engine
+
+	s2 := newStack(t, dbPath, configPath) // same config: the startup sync changes nothing
+	var events []map[string]any
+	s2.do(http.MethodGet, "/events?limit=500", "", nil, &events)
+
+	if n := countEvents(events, "process_started"); n != 2 {
+		t.Fatalf("process_started events = %d, want one per boot (2): %v", n, events)
+	}
+	ps := firstEvent(events, "process_started")
+	msg, _ := ps["message"].(string)
+	if ps["actor"] != "system" || ps["level"] != "info" || !strings.Contains(msg, "e2e-comp") ||
+		!strings.Contains(msg, "stopped") || !strings.Contains(msg, "paused") {
+		t.Errorf("process_started = %v, want an info event by system naming the session and the stopped/paused state", ps)
+	}
+	if ev := firstEvent(events, "engine_stopped"); ev == nil || ev["actor"] != "system" {
+		t.Errorf("shutdown engine_stopped = %v, want one by system", ev)
+	}
+	if ev := firstEvent(events, "engine_started"); ev == nil || ev["actor"] != "admin" {
+		t.Errorf("engine_started = %v, want the admin's", ev)
+	}
+	// The first boot added svc1 and says so; the second changed nothing.
+	if n := countEvents(events, "config_reloaded"); n != 1 {
+		t.Errorf("config_reloaded events = %d, want 1 (only the first boot changed anything): %v", n, events)
+	}
+	if ev := firstEvent(events, "service_added"); ev == nil || ev["actor"] != "system" {
+		t.Errorf("startup service_added = %v, want one by system", ev)
+	}
 }
 
 // TestExampleConfigStarts keeps the documented config.example.yaml in step
