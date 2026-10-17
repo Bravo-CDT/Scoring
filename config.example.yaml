@@ -1,0 +1,80 @@
+# Example scoring engine config. Copy to config.yaml and edit.
+#
+# Run:   go build ./cmd/scoringengine
+#        ADMIN_PASSWORD_HASH='<hash>' ./scoringengine -config config.yaml -db scoring.db -addr :8080
+#
+# The engine always starts STOPPED with scoring PAUSED (also after a crash or
+# restart). To begin: POST /login {"username","password"} -> {"token"}, then,
+# with "Authorization: Bearer <token>", POST /engine/start (checks begin) and
+# POST /scoring/resume (failures begin costing points). Tokens do not survive a
+# restart; log in again.
+#
+# Unknown keys are rejected, so a typo fails at startup instead of being
+# silently ignored. Edits take effect via POST /reload (adds/removes services)
+# or POST /services/<name>/restart (re-reads that service's entry).
+
+# Identifies the competition. Restarting with the same name continues the same
+# scores and history; a new name starts a fresh session in the same database.
+session_name: "example-comp"
+
+# Blue team's starting points. Only used when the session is first created;
+# changing it later has no effect on an existing session.
+starting_score: 1000
+
+# Optional. If at least this fraction (0 < f <= 1) of active services are
+# failing at the same time (each one's latest check failed), all scoring is
+# paused automatically -- a safety net for an outage on the scoring side
+# rather than the blue team's. An admin must resume it. Omit to disable.
+# Read at startup only (not on /reload).
+mass_failure_fraction: 0.8
+
+admin:
+  username: admin
+  # A bcrypt hash, never the plain password. A dollar-brace reference like the
+  # one below is replaced with that environment variable's value (an unset
+  # variable is a startup error), which keeps the hash out of this file.
+  # Expansion happens anywhere in the file, comments included, so do not write
+  # such a reference in a comment. Generate a hash with either of:
+  #   htpasswd -bnBC 10 "" 'your-password' | tr -d ':\n'
+  #   python3 -c 'import bcrypt; print(bcrypt.hashpw(b"your-password", bcrypt.gensalt()).decode())'
+  # Single-quote the hash when exporting it: it contains '$' characters.
+  password_hash: ${ADMIN_PASSWORD_HASH}
+
+# Each service is checked every interval_seconds (seconds, a positive integer);
+# a check still running at the end of its interval is cancelled and counts as a
+# failure. Each failure costs points_per_failure. Service names are the keys
+# for scoring history: renaming one creates a new service.
+#
+# check_type is one of:
+#   tcp_connect  succeeds if a TCP connection to host:port opens.
+#                params: port (required, integer 1-65535)
+#   http         plain-HTTP GET; succeeds on the expected status (and body).
+#                params: port (required, integer 1-65535), path (string
+#                starting with "/", default "/"), expect_status (integer
+#                100-599, default 200), expect_contains (optional string;
+#                substring of the first 64 KiB of the body).
+#                Redirects are NOT followed: a 301/302 is judged as-is, so
+#                it passes only if expect_status names that code.
+# Params are validated per check type at startup and on /reload: a missing
+# required param, a value of the wrong type or range, or a param the check
+# type does not know (e.g. a misspelled "expect_contain") is an error naming
+# the service and the param, and the config is refused.
+services:
+  - name: web
+    host: 10.0.0.10
+    check_type: http
+    interval_seconds: 30
+    points_per_failure: 5
+    params:
+      port: 80
+      path: /
+      expect_status: 200
+      expect_contains: "Welcome"
+
+  - name: ssh
+    host: 10.0.0.11
+    check_type: tcp_connect
+    interval_seconds: 60
+    points_per_failure: 10
+    params:
+      port: 22
