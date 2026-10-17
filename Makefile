@@ -1,83 +1,40 @@
-.PHONY: help up config boot login go status events kill-api pause pause-api \
-        reload break-dns fix-dns detail mass-failure restart-engine demo clean
+.PHONY: help build run hash demo-targets stop-demo-targets clean
 
-SCRIPT := scripts/manual-test.sh
-N ?= 5
+BIN    := bin/scoringengine
+CONFIG ?= config.yaml
+DB     ?= scoring.db
+ADDR   ?= :8080
 
 help:
-	@echo "Manual testing targets for docs/manual-testing.md (run in this order,"
-	@echo "or just 'make demo' to run the whole walkthrough non-interactively):"
-	@echo ""
-	@echo "  make up             1. build the engine; start fake web/api/ssh services"
-	@echo "  make config         2. write config.yaml and the admin password hash"
-	@echo "  make boot           3. start the scoring engine process (stopped+paused)"
-	@echo "  make login          4a. log in as admin, save the bearer token"
-	@echo "  make go             4b. start check routines, then resume scoring"
-	@echo "  make kill-api       5. kill the api fake service"
-	@echo "  make pause          6a. pause scoring globally, prove the score freezes"
-	@echo "  make pause-api      6b. pause only api's scoring, then resume globally"
-	@echo "  make reload         7a. add a dns service + reprice web; hot-reload"
-	@echo "  make break-dns      7b. introduce a config typo, see it rejected"
-	@echo "  make fix-dns        7c. fix the typo, start dns"
-	@echo "  make detail         8. show check/event detail is admin-only"
-	@echo "  make mass-failure   9. cross the autopause threshold twice"
-	@echo "  make restart-engine 10. SIGTERM + restart the process, state survives"
-	@echo "  make clean          11. kill everything, remove .manual-test/"
-	@echo ""
-	@echo "  make status         pretty-print GET /status any time"
-	@echo "  make events N=20    pretty-print the last N events (default 5)"
-	@echo "  make demo           run steps 1-10 automatically back to back"
+	@echo "  make build                 build the engine to $(BIN)"
+	@echo "  make run                   run it against CONFIG=$(CONFIG) DB=$(DB) ADDR=$(ADDR)"
+	@echo "                             (needs ADMIN_PASSWORD_HASH set in the environment)"
+	@echo "  make hash PASSWORD=x       print a bcrypt hash of x for admin.password_hash"
+	@echo "  make demo-targets          start three fake local services to point demo checks at"
+	@echo "  make stop-demo-targets     stop them"
+	@echo "  make clean                 remove the built binary and any local demo state"
+	@echo
+	@echo "First run: cp config.example.yaml config.yaml (edit it), or"
+	@echo "cp config.demo.yaml config.yaml && make demo-targets to try it out locally."
 
-up:
-	@$(SCRIPT) up
+build:
+	go build -o $(BIN) ./cmd/scoringengine
 
-config:
-	@$(SCRIPT) config
+run: build
+	@test -f "$(CONFIG)" || { echo "no $(CONFIG) -- copy config.example.yaml or config.demo.yaml to $(CONFIG) first"; exit 1; }
+	@test -n "$$ADMIN_PASSWORD_HASH" || { echo "ADMIN_PASSWORD_HASH is not set -- see 'make hash'"; exit 1; }
+	$(BIN) -config "$(CONFIG)" -db "$(DB)" -addr "$(ADDR)"
 
-boot:
-	@$(SCRIPT) boot
+hash:
+	@test -n "$(PASSWORD)" || { echo "usage: make hash PASSWORD=yourpassword"; exit 1; }
+	@go run ./scripts/hashpw "$(PASSWORD)"
 
-login:
-	@$(SCRIPT) login
+demo-targets:
+	@scripts/demo-targets.sh up
 
-go:
-	@$(SCRIPT) go
-
-status:
-	@$(SCRIPT) status
-
-events:
-	@$(SCRIPT) events $(N)
-
-kill-api:
-	@$(SCRIPT) kill-api
-
-pause:
-	@$(SCRIPT) pause
-
-pause-api:
-	@$(SCRIPT) pause-api
-
-reload:
-	@$(SCRIPT) reload
-
-break-dns:
-	@$(SCRIPT) break-dns
-
-fix-dns:
-	@$(SCRIPT) fix-dns
-
-detail:
-	@$(SCRIPT) detail
-
-mass-failure:
-	@$(SCRIPT) mass-failure
-
-restart-engine:
-	@$(SCRIPT) restart-engine
-
-demo:
-	@$(SCRIPT) demo
+stop-demo-targets:
+	@scripts/demo-targets.sh down
 
 clean:
-	@$(SCRIPT) clean
+	@scripts/demo-targets.sh down >/dev/null 2>&1 || true
+	rm -rf bin .demo-targets "$(DB)"

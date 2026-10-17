@@ -1,0 +1,39 @@
+# A config for trying the engine out against `make demo-targets` (three fake
+# local services) instead of real blue-team hosts. Copy to config.yaml, or
+# run with CONFIG=config.demo.yaml. See config.example.yaml for the real
+# per-field reference.
+session_name: "demo"
+starting_score: 1000
+mass_failure_fraction: 0.6
+
+admin:
+  username: admin
+  password_hash: ${ADMIN_PASSWORD_HASH}
+
+services:
+  - name: web
+    host: 127.0.0.1
+    check_type: http
+    interval_seconds: 5
+    points_per_failure: 10
+    params:
+      port: 18081
+      path: /
+      expect_status: 200
+      expect_contains: "demo target"
+
+  - name: api
+    host: 127.0.0.1
+    check_type: http
+    interval_seconds: 5
+    points_per_failure: 5
+    params:
+      port: 18082
+
+  - name: ssh
+    host: 127.0.0.1
+    check_type: tcp_connect
+    interval_seconds: 5
+    points_per_failure: 20
+    params:
+      port: 18083

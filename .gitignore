@@ -1,1 +1,5 @@
-/.manual-test/
+/bin/
+/.demo-targets/
+/config.yaml
+/scoring.db
+temp_*
