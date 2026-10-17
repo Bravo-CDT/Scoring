@@ -62,7 +62,6 @@ CREATE TABLE IF NOT EXISTS service_config_snapshots (
 	applied_at         INTEGER NOT NULL,
 	host               TEXT NOT NULL,
 	check_type         TEXT NOT NULL,
-	interval_seconds   INTEGER NOT NULL,
 	points_per_failure INTEGER NOT NULL,
 	params_json        TEXT NOT NULL
 );

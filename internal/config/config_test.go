@@ -31,6 +31,7 @@ var realHash = func() string {
 const validYAML = `
 session_name: "test-session"
 starting_score: 1000
+round_interval_seconds: 30
 mass_failure_fraction: 0.5
 
 admin:
@@ -41,7 +42,6 @@ services:
   - name: apache-web
     host: 10.0.1.10
     check_type: http
-    interval_seconds: 60
     points_per_failure: 10
     params:
       port: 80
@@ -52,7 +52,6 @@ services:
   - name: telnet-win
     host: 10.0.2.15
     check_type: tcp_connect
-    interval_seconds: 30
     points_per_failure: 5
     params:
       port: 23
@@ -63,6 +62,7 @@ services:
 const minimalYAML = `
 session_name: "minimal"
 starting_score: 500
+round_interval_seconds: 60
 admin:
   username: admin
   password_hash: ${TEST_ADMIN_HASH}
@@ -70,7 +70,6 @@ services:
   - name: svc1
     host: 127.0.0.1
     check_type: tcp_connect
-    interval_seconds: 60
     points_per_failure: 10
     params: {port: 22}
 `
@@ -106,6 +105,9 @@ func TestLoad_Valid(t *testing.T) {
 	if cfg.StartingScore != 1000 {
 		t.Errorf("StartingScore = %d, want 1000", cfg.StartingScore)
 	}
+	if cfg.RoundIntervalSeconds != 30 {
+		t.Errorf("RoundIntervalSeconds = %d, want 30", cfg.RoundIntervalSeconds)
+	}
 	if cfg.MassFailureFraction == nil {
 		t.Fatal("MassFailureFraction = nil, want 0.5")
 	}
@@ -132,9 +134,6 @@ func TestLoad_Valid(t *testing.T) {
 	if web.CheckType != "http" {
 		t.Errorf("Services[0].CheckType = %q, want http", web.CheckType)
 	}
-	if web.IntervalSeconds != 60 {
-		t.Errorf("Services[0].IntervalSeconds = %d, want 60", web.IntervalSeconds)
-	}
 	if web.PointsPerFailure != 10 {
 		t.Errorf("Services[0].PointsPerFailure = %d, want 10", web.PointsPerFailure)
 	}
@@ -143,8 +142,8 @@ func TestLoad_Valid(t *testing.T) {
 	if telnet.Name != "telnet-win" || telnet.CheckType != "tcp_connect" {
 		t.Errorf("Services[1] = %+v, want telnet-win/tcp_connect", telnet)
 	}
-	if telnet.IntervalSeconds != 30 || telnet.PointsPerFailure != 5 {
-		t.Errorf("Services[1] interval/points = %d/%d, want 30/5", telnet.IntervalSeconds, telnet.PointsPerFailure)
+	if telnet.PointsPerFailure != 5 {
+		t.Errorf("Services[1].PointsPerFailure = %d, want 5", telnet.PointsPerFailure)
 	}
 }
 
@@ -270,7 +269,6 @@ func TestLoadService_RejectsInvalidParams(t *testing.T) {
   - name: broken
     host: 10.0.3.1
     check_type: tcp_connect
-    interval_seconds: 30
     points_per_failure: 5
     params: {prot: 23}
 `
@@ -349,6 +347,7 @@ func TestLoad_InvalidConfigs(t *testing.T) {
 			yaml: `
 session_name: "s"
 starting_score: 1000
+round_interval_seconds: 60
 mass_failure_fracton: 0.5
 admin:
   username: admin
@@ -357,7 +356,6 @@ services:
   - name: svc1
     host: 127.0.0.1
     check_type: http
-    interval_seconds: 60
     points_per_failure: 10
 `,
 			wantErr: "mass_failure_fracton",
@@ -366,13 +364,22 @@ services:
 			// Strictness is recursive: a typo inside a service entry is
 			// rejected too, instead of leaving the field at its zero value.
 			name:    "unknown service field",
-			yaml:    strings.Replace(minimalYAML, "interval_seconds: 60", "interval_second: 60", 1),
-			wantErr: "interval_second",
+			yaml:    strings.Replace(minimalYAML, "points_per_failure: 10", "points_per_falure: 10", 1),
+			wantErr: "points_per_falure",
+		},
+		{
+			// The pre-rounds per-service interval is gone; a config still
+			// carrying one must fail loudly rather than have it silently
+			// ignored in favour of the shared round interval.
+			name:    "leftover per-service interval_seconds",
+			yaml:    strings.Replace(minimalYAML, "    points_per_failure: 10\n", "    points_per_failure: 10\n    interval_seconds: 60\n", 1),
+			wantErr: "interval_seconds",
 		},
 		{
 			name: "missing session_name",
 			yaml: `
 starting_score: 1000
+round_interval_seconds: 60
 admin:
   username: admin
   password_hash: ${TEST_ADMIN_HASH}
@@ -380,7 +387,6 @@ services:
   - name: svc1
     host: 127.0.0.1
     check_type: http
-    interval_seconds: 60
     points_per_failure: 10
 `,
 			wantErr: "session_name",
@@ -421,7 +427,6 @@ services:
   - name: apache-web
     host: 10.0.1.99
     check_type: http
-    interval_seconds: 60
     points_per_failure: 10
     params:
       port: 80
@@ -438,13 +443,13 @@ services:
 			yaml: `
 session_name: "s"
 starting_score: 1000
+round_interval_seconds: 60
 admin:
   username: admin
   password_hash: ${TEST_ADMIN_HASH}
 services:
   - host: 127.0.0.1
     check_type: http
-    interval_seconds: 60
     points_per_failure: 10
 `,
 			wantErr: "services[0].name",
@@ -453,11 +458,6 @@ services:
 			name:    "missing service host",
 			yaml:    strings.Replace(minimalYAML, "    host: 127.0.0.1\n", "", 1),
 			wantErr: "host",
-		},
-		{
-			name:    "zero interval_seconds",
-			yaml:    strings.Replace(minimalYAML, "interval_seconds: 60", "interval_seconds: 0", 1),
-			wantErr: "interval_seconds",
 		},
 		{
 			name:    "negative points_per_failure",
@@ -480,6 +480,26 @@ services:
 	}
 }
 
+func TestLoad_RoundIntervalSecondsRequired(t *testing.T) {
+	setHash(t)
+	_, err := Load(writeTemp(t, strings.Replace(minimalYAML, "round_interval_seconds: 60\n", "", 1)))
+	if err == nil || !strings.Contains(err.Error(), "round_interval_seconds") {
+		t.Fatalf("Load error = %v, want one naming round_interval_seconds", err)
+	}
+}
+
+func TestLoad_RoundIntervalSecondsMustBePositive(t *testing.T) {
+	for _, n := range []string{"0", "-5"} {
+		t.Run(n, func(t *testing.T) {
+			setHash(t)
+			_, err := Load(writeTemp(t, strings.Replace(minimalYAML, "round_interval_seconds: 60", "round_interval_seconds: "+n, 1)))
+			if err == nil || !strings.Contains(err.Error(), "round_interval_seconds must be a positive integer") {
+				t.Fatalf("Load error = %v, want the positive-integer error", err)
+			}
+		})
+	}
+}
+
 func TestLoadService_Found(t *testing.T) {
 	setHash(t)
 	svc, err := LoadService(writeTemp(t, validYAML), "telnet-win")
@@ -492,8 +512,8 @@ func TestLoadService_Found(t *testing.T) {
 	if svc.Host != "10.0.2.15" {
 		t.Errorf("Host = %q, want 10.0.2.15", svc.Host)
 	}
-	if svc.IntervalSeconds != 30 {
-		t.Errorf("IntervalSeconds = %d, want 30", svc.IntervalSeconds)
+	if svc.PointsPerFailure != 5 {
+		t.Errorf("PointsPerFailure = %d, want 5", svc.PointsPerFailure)
 	}
 	if port, _ := svc.Params["port"].(int); port != 23 {
 		t.Errorf("Params[port] = %#v, want 23", svc.Params["port"])

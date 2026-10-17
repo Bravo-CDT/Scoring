@@ -1,6 +1,6 @@
-// Command scoringengine runs the competition scoring engine: it checks each
-// configured service on its interval, deducts points for failures, and serves
-// the public scoreboard and admin control API over HTTP.
+// Command scoringengine runs the competition scoring engine: it checks every
+// configured service once per shared scoring round, deducts points for
+// failures, and serves the public scoreboard and admin control API over HTTP.
 //
 // The engine always starts STOPPED with scoring PAUSED, even after a crash
 // mid-competition. An admin must POST /login, then /engine/start (checks
@@ -30,8 +30,8 @@ const (
 	idleTimeout       = 120 * time.Second
 
 	// shutdownTimeout bounds the whole graceful shutdown: draining in-flight
-	// requests, then stopping every check routine (each bounded by its own
-	// interval) and closing the database.
+	// requests, then stopping the round loop (bounded by a check's short
+	// grace period) and the engine, and closing the database.
 	shutdownTimeout = 30 * time.Second
 )
 
@@ -113,8 +113,8 @@ func shutdown(srv *http.Server, serveErr <-chan error, a *app.App) error {
 		errs = append(errs, fmt.Errorf("http server: %w", err))
 	}
 
-	// Engine.Stop waits for every routine to exit; each is bounded by its
-	// check's interval, but run it under the same deadline regardless so
+	// Close waits for the round loop to exit, which is bounded by a check's
+	// grace period, but run it under the same deadline regardless so
 	// shutdown can never hang. On timeout the process exits anyway: the
 	// store forces the engine stopped on the next start.
 	closed := make(chan error, 1)

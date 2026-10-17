@@ -53,11 +53,38 @@ func newService(t *testing.T, st *store.Store, sessionID int64, name string) sto
 	return svc
 }
 
+// recordAlone records result as the only result of a round of its own,
+// numbered as the Scheduler would number it, and returns RecordRound's error.
+func recordAlone(t *testing.T, sc *Scorer, serviceID int64, points int, result checks.Result, latency time.Duration) error {
+	t.Helper()
+	round, err := sc.store.NextRoundNumber(sc.sessionID)
+	if err != nil {
+		t.Fatalf("NextRoundNumber: %v", err)
+	}
+	return sc.RecordRound(round, time.Now(), []checks.RoundResult{
+		{ServiceID: serviceID, PointsPerFailure: points, Result: result, Latency: latency},
+	})
+}
+
+// record is recordAlone for a call that must succeed.
 func record(t *testing.T, sc *Scorer, serviceID int64, points int, result checks.Result) {
 	t.Helper()
-	if err := sc.Record(serviceID, points, result, 5*time.Millisecond); err != nil {
-		t.Fatalf("Record(service %d, success=%v): %v", serviceID, result.Success, err)
+	if err := recordAlone(t, sc, serviceID, points, result, 5*time.Millisecond); err != nil {
+		t.Fatalf("RecordRound(service %d, success=%v): %v", serviceID, result.Success, err)
 	}
+}
+
+// recordRound records results as one round and fails the test on error.
+func recordRound(t *testing.T, sc *Scorer, round int, roundStart time.Time, results ...checks.RoundResult) {
+	t.Helper()
+	if err := sc.RecordRound(round, roundStart, results); err != nil {
+		t.Fatalf("RecordRound(round %d): %v", round, err)
+	}
+}
+
+// outcome builds a RoundResult worth 10 points per failure.
+func outcome(serviceID int64, result checks.Result) checks.RoundResult {
+	return checks.RoundResult{ServiceID: serviceID, PointsPerFailure: 10, Result: result, Latency: time.Millisecond}
 }
 
 func wantScore(t *testing.T, st *store.Store, sessionID int64, wantBlue, wantRed int) {
@@ -119,13 +146,13 @@ func latestResult(t *testing.T, st *store.Store, serviceID int64) store.CheckRes
 
 func fraction(v float64) *float64 { return &v }
 
-func TestRecord_FailureTransfersPointsAndRecordsResult(t *testing.T) {
+func TestRecordRound_FailureTransfersPointsAndRecordsResult(t *testing.T) {
 	st, sess := openTestStore(t, 1000)
 	svc := newService(t, st, sess.ID, "apache-web")
 	sc := New(st, sess.ID, nil)
 
-	if err := sc.Record(svc.ID, 10, fail, 42*time.Millisecond); err != nil {
-		t.Fatalf("Record: %v", err)
+	if err := recordAlone(t, sc, svc.ID, 10, fail, 42*time.Millisecond); err != nil {
+		t.Fatalf("RecordRound: %v", err)
 	}
 
 	wantScore(t, st, sess.ID, 990, 10)
@@ -143,7 +170,7 @@ func TestRecord_FailureTransfersPointsAndRecordsResult(t *testing.T) {
 	}
 }
 
-func TestRecord_PassMovesNoPoints(t *testing.T) {
+func TestRecordRound_PassMovesNoPoints(t *testing.T) {
 	st, sess := openTestStore(t, 1000)
 	svc := newService(t, st, sess.ID, "apache-web")
 	sc := New(st, sess.ID, nil)
@@ -157,7 +184,7 @@ func TestRecord_PassMovesNoPoints(t *testing.T) {
 	}
 }
 
-func TestRecord_EmitsEventsOnlyOnTransitions(t *testing.T) {
+func TestRecordRound_EmitsEventsOnlyOnTransitions(t *testing.T) {
 	st, sess := openTestStore(t, 1000)
 	svc := newService(t, st, sess.ID, "apache-web")
 	sc := New(st, sess.ID, nil)
@@ -182,7 +209,7 @@ func TestRecord_EmitsEventsOnlyOnTransitions(t *testing.T) {
 	}
 }
 
-func TestRecord_FirstResultIsATransition(t *testing.T) {
+func TestRecordRound_FirstResultIsATransition(t *testing.T) {
 	st, sess := openTestStore(t, 1000)
 	up := newService(t, st, sess.ID, "svc-up")
 	down := newService(t, st, sess.ID, "svc-down")
@@ -198,7 +225,7 @@ func TestRecord_FirstResultIsATransition(t *testing.T) {
 	}
 }
 
-func TestRecord_GlobalPauseRecordsButDoesNotScore(t *testing.T) {
+func TestRecordRound_GlobalPauseRecordsButDoesNotScore(t *testing.T) {
 	st, sess := openTestStore(t, 1000)
 	svc := newService(t, st, sess.ID, "apache-web")
 	if err := st.SetGlobalScoringPaused(true); err != nil {
@@ -221,7 +248,7 @@ func TestRecord_GlobalPauseRecordsButDoesNotScore(t *testing.T) {
 	}
 }
 
-func TestRecord_PerServicePauseRecordsButDoesNotScore(t *testing.T) {
+func TestRecordRound_PerServicePauseRecordsButDoesNotScore(t *testing.T) {
 	st, sess := openTestStore(t, 1000)
 	paused := newService(t, st, sess.ID, "paused-svc")
 	scored := newService(t, st, sess.ID, "scored-svc")
@@ -243,7 +270,7 @@ func TestRecord_PerServicePauseRecordsButDoesNotScore(t *testing.T) {
 
 // Both pause flags can change while the engine runs; the same Scorer must
 // honor every change on its very next result.
-func TestRecord_PauseFlagsAreReadFreshEachCall(t *testing.T) {
+func TestRecordRound_PauseFlagsAreReadFreshEachCall(t *testing.T) {
 	st, sess := openTestStore(t, 1000)
 	svc := newService(t, st, sess.ID, "apache-web")
 	sc := New(st, sess.ID, nil)
@@ -278,7 +305,7 @@ func TestRecord_PauseFlagsAreReadFreshEachCall(t *testing.T) {
 	}
 }
 
-func TestRecord_DuplicateSourceRefIsANoOp(t *testing.T) {
+func TestRecordRound_DuplicateSourceRefIsANoOp(t *testing.T) {
 	st, sess := openTestStore(t, 1000)
 	svc := newService(t, st, sess.ID, "apache-web")
 	sc := New(st, sess.ID, nil)
@@ -297,13 +324,13 @@ func TestRecord_DuplicateSourceRefIsANoOp(t *testing.T) {
 	wantScore(t, st, sess.ID, 990, 10) // the pre-scored transfer only, not a second one
 }
 
-func TestRecord_UnknownServiceIsAnError(t *testing.T) {
+func TestRecordRound_UnknownServiceIsAnError(t *testing.T) {
 	st, sess := openTestStore(t, 1000)
 	logger, _ := quietLogger()
 	sc := New(st, sess.ID, nil, WithLogger(logger))
 
-	if err := sc.Record(9999, 10, fail, time.Millisecond); err == nil {
-		t.Fatal("Record for an unknown service returned nil, want an error")
+	if err := recordAlone(t, sc, 9999, 10, fail, time.Millisecond); err == nil {
+		t.Fatal("RecordRound for an unknown service returned nil, want an error")
 	}
 	wantScore(t, st, sess.ID, 1000, 0)
 }
@@ -315,19 +342,19 @@ func quietLogger() (*log.Logger, *bytes.Buffer) {
 	return log.New(&buf, "", 0), &buf
 }
 
-// The Scheduler discards Record's error, so the Scorer itself must leave a
+// The Scheduler discards RecordRound's error, so the Scorer itself must leave a
 // trace of every failed write: in the log always, and in the event log when
 // the store can still take the event.
-func TestRecord_StoreFailureIsReturnedAndLogged(t *testing.T) {
+func TestRecordRound_StoreFailureIsReturnedAndLogged(t *testing.T) {
 	st, sess := openTestStore(t, 1000)
 	svc := newService(t, st, sess.ID, "apache-web")
 	logger, logs := quietLogger()
 	sc := New(st, sess.ID, nil, WithLogger(logger))
 	st.Close()
 
-	err := sc.Record(svc.ID, 10, fail, time.Millisecond)
+	err := sc.RecordRound(1, time.Now(), []checks.RoundResult{outcome(svc.ID, fail)})
 	if err == nil {
-		t.Fatal("Record on a closed store returned nil, want an error")
+		t.Fatal("RecordRound on a closed store returned nil, want an error")
 	}
 	out := logs.String()
 	if !strings.Contains(out, fmt.Sprintf("service %d", svc.ID)) || !strings.Contains(out, err.Error()) {
@@ -340,7 +367,7 @@ func TestRecord_StoreFailureIsReturnedAndLogged(t *testing.T) {
 	}
 }
 
-func TestRecord_FailureWritesPersistenceErrorEvent(t *testing.T) {
+func TestRecordRound_FailureWritesPersistenceErrorEvent(t *testing.T) {
 	st, sess := openTestStore(t, 1000)
 	logger, logs := quietLogger()
 	sc := New(st, sess.ID, nil, WithLogger(logger))
@@ -348,9 +375,9 @@ func TestRecord_FailureWritesPersistenceErrorEvent(t *testing.T) {
 	// A service id with no row: loading it fails, while the store itself is
 	// still writable, so the error event can be recorded.
 	const missing int64 = 9999
-	err := sc.Record(missing, 10, fail, time.Millisecond)
+	err := recordAlone(t, sc, missing, 10, fail, time.Millisecond)
 	if err == nil {
-		t.Fatal("Record for an unknown service returned nil, want an error")
+		t.Fatal("RecordRound for an unknown service returned nil, want an error")
 	}
 	if !strings.Contains(logs.String(), err.Error()) {
 		t.Errorf("log = %q, want the error %q", logs.String(), err)
@@ -376,7 +403,7 @@ func TestRecord_FailureWritesPersistenceErrorEvent(t *testing.T) {
 	}
 }
 
-func TestRecord_MassFailureAutopause(t *testing.T) {
+func TestRecordRound_MassFailureAutopause(t *testing.T) {
 	st, sess := openTestStore(t, 1000)
 	svcA := newService(t, st, sess.ID, "svc-a")
 	svcB := newService(t, st, sess.ID, "svc-b")
@@ -416,7 +443,7 @@ func TestRecord_MassFailureAutopause(t *testing.T) {
 
 // Services that have not reported yet are unknown, not down: one early
 // failure among many silent services must not pause the competition.
-func TestRecord_MassFailureCountsUnreportedServicesAsNotFailing(t *testing.T) {
+func TestRecordRound_MassFailureCountsUnreportedServicesAsNotFailing(t *testing.T) {
 	st, sess := openTestStore(t, 1000)
 	var services []store.Service
 	for i := range 10 {
@@ -442,7 +469,7 @@ func TestRecord_MassFailureCountsUnreportedServicesAsNotFailing(t *testing.T) {
 	}
 }
 
-func TestRecord_MassFailureIgnoresInactiveServices(t *testing.T) {
+func TestRecordRound_MassFailureIgnoresInactiveServices(t *testing.T) {
 	st, sess := openTestStore(t, 1000)
 	svcA := newService(t, st, sess.ID, "svc-a")
 	for i := range 3 {
@@ -463,7 +490,7 @@ func TestRecord_MassFailureIgnoresInactiveServices(t *testing.T) {
 // After an autopause, an admin who decides the failures are genuine red-team
 // action resumes scoring. The safety net is edge-triggered, so it must not
 // override that call while the same mass failure is still going on.
-func TestRecord_MassFailureResumeIsNotOverridden(t *testing.T) {
+func TestRecordRound_MassFailureResumeIsNotOverridden(t *testing.T) {
 	st, sess := openTestStore(t, 1000)
 	svcA := newService(t, st, sess.ID, "svc-a")
 	svcB := newService(t, st, sess.ID, "svc-b")
@@ -507,7 +534,7 @@ func TestRecord_MassFailureResumeIsNotOverridden(t *testing.T) {
 // admin is already looking, and resuming during that same mass failure is the
 // same judgment call as resuming after an autopause, so it must not be
 // overridden either.
-func TestRecord_MassFailureCrossingDuringManualPauseIsConsumed(t *testing.T) {
+func TestRecordRound_MassFailureCrossingDuringManualPauseIsConsumed(t *testing.T) {
 	st, sess := openTestStore(t, 1000)
 	svcA := newService(t, st, sess.ID, "svc-a")
 	svcB := newService(t, st, sess.ID, "svc-b")
@@ -537,7 +564,7 @@ func TestRecord_MassFailureCrossingDuringManualPauseIsConsumed(t *testing.T) {
 // restart in the middle of a sweep the admin may already have judged genuine —
 // has seen no crossing, so it must not fire until it has seen the share below
 // the threshold.
-func TestRecord_MassFailureNeedsABelowThresholdEvaluationToArm(t *testing.T) {
+func TestRecordRound_MassFailureNeedsABelowThresholdEvaluationToArm(t *testing.T) {
 	st, sess := openTestStore(t, 1000)
 	svcA := newService(t, st, sess.ID, "svc-a")
 	svcB := newService(t, st, sess.ID, "svc-b")
@@ -568,16 +595,16 @@ func TestRecord_MassFailureNeedsABelowThresholdEvaluationToArm(t *testing.T) {
 	}
 }
 
-// Only services whose routine is running count: a stopped routine's last
+// Only services the Scheduler is running count: a stopped service's last
 // result is stale (it may have been stopped precisely because it was failing),
 // so it is left out of both the failing count and the total.
-func TestRecord_MassFailureCountsOnlyRunningServices(t *testing.T) {
+func TestRecordRound_MassFailureCountsOnlyRunningServices(t *testing.T) {
 	st, sess := openTestStore(t, 1000)
 	var services []store.Service
 	for i := range 10 {
 		services = append(services, newService(t, st, sess.ID, fmt.Sprintf("svc-%d", i)))
 	}
-	// svc-8 and svc-9 were failing when their routines were stopped.
+	// svc-8 and svc-9 were failing when they were stopped.
 	stopped := map[int64]bool{services[8].ID: true, services[9].ID: true}
 	for id := range stopped {
 		if _, err := st.InsertCheckResult(store.CheckResult{SessionID: sess.ID, ServiceID: id, Success: false}); err != nil {
@@ -594,7 +621,7 @@ func TestRecord_MassFailureCountsOnlyRunningServices(t *testing.T) {
 	// 3 of 8 running services failing. Counting the stopped two would make
 	// it 5 of 10 and pause.
 	if scoringPaused(t, st) {
-		t.Fatal("paused at 3 of 8 running services failing; stopped routines were counted")
+		t.Fatal("paused at 3 of 8 running services failing; stopped services were counted")
 	}
 	record(t, sc, services[4].ID, 10, fail) // 4 of 8
 	if !scoringPaused(t, st) {
@@ -602,7 +629,7 @@ func TestRecord_MassFailureCountsOnlyRunningServices(t *testing.T) {
 	}
 }
 
-func TestRecord_MassFailureDisabledWithoutFraction(t *testing.T) {
+func TestRecordRound_MassFailureDisabledWithoutFraction(t *testing.T) {
 	st, sess := openTestStore(t, 1000)
 	svcA := newService(t, st, sess.ID, "svc-a")
 	svcB := newService(t, st, sess.ID, "svc-b")
@@ -620,7 +647,7 @@ func TestRecord_MassFailureDisabledWithoutFraction(t *testing.T) {
 	}
 }
 
-func TestRecord_MassFailureDoesNotFireWhenAlreadyPaused(t *testing.T) {
+func TestRecordRound_MassFailureDoesNotFireWhenAlreadyPaused(t *testing.T) {
 	st, sess := openTestStore(t, 1000)
 	svc := newService(t, st, sess.ID, "svc-a")
 	if err := st.SetGlobalScoringPaused(true); err != nil {
@@ -637,7 +664,7 @@ func TestRecord_MassFailureDoesNotFireWhenAlreadyPaused(t *testing.T) {
 
 // Many services crossing the threshold at once must still produce exactly
 // one autopause event.
-func TestRecord_MassFailureFiresOnceUnderConcurrency(t *testing.T) {
+func TestRecordRound_MassFailureFiresOnceUnderConcurrency(t *testing.T) {
 	st, sess := openTestStore(t, 1000)
 	var services []store.Service
 	for i := range 8 {
@@ -654,14 +681,14 @@ func TestRecord_MassFailureFiresOnceUnderConcurrency(t *testing.T) {
 	errs := make(chan error, len(services))
 	for _, svc := range services {
 		wg.Go(func() {
-			errs <- sc.Record(svc.ID, 10, fail, time.Millisecond)
+			errs <- sc.RecordRound(2, time.Now(), []checks.RoundResult{outcome(svc.ID, fail)})
 		})
 	}
 	wg.Wait()
 	close(errs)
 	for err := range errs {
 		if err != nil {
-			t.Errorf("Record: %v", err)
+			t.Errorf("RecordRound: %v", err)
 		}
 	}
 
@@ -676,7 +703,7 @@ func TestRecord_MassFailureFiresOnceUnderConcurrency(t *testing.T) {
 // Two services failing in the same instant against a balance that covers only
 // one full transfer: the floor holds, so exactly the balance moves and blue
 // never goes negative.
-func TestRecord_ConcurrentFailuresRespectFloor(t *testing.T) {
+func TestRecordRound_ConcurrentFailuresRespectFloor(t *testing.T) {
 	st, sess := openTestStore(t, 15)
 	svcA := newService(t, st, sess.ID, "svc-a")
 	svcB := newService(t, st, sess.ID, "svc-b")
@@ -688,7 +715,7 @@ func TestRecord_ConcurrentFailuresRespectFloor(t *testing.T) {
 	for _, id := range []int64{svcA.ID, svcB.ID} {
 		wg.Go(func() {
 			<-start
-			errs <- sc.Record(id, 10, fail, time.Millisecond)
+			errs <- sc.RecordRound(1, time.Now(), []checks.RoundResult{outcome(id, fail)})
 		})
 	}
 	close(start)
@@ -696,9 +723,135 @@ func TestRecord_ConcurrentFailuresRespectFloor(t *testing.T) {
 	close(errs)
 	for err := range errs {
 		if err != nil {
-			t.Errorf("Record: %v", err)
+			t.Errorf("RecordRound: %v", err)
 		}
 	}
 
 	wantScore(t, st, sess.ID, 0, 15)
+}
+
+func TestRecordRound_TagsEveryResultWithTheRoundNumberAndSharesOneTimestamp(t *testing.T) {
+	st, sess := openTestStore(t, 1000)
+	svcA := newService(t, st, sess.ID, "svc-a")
+	svcB := newService(t, st, sess.ID, "svc-b")
+	sc := New(st, sess.ID, nil)
+
+	// Well in the past, so a row stamped with time.Now() at insert time could
+	// not pass for it.
+	roundStart := time.Now().Add(-time.Hour).Truncate(time.Millisecond).UTC()
+	recordRound(t, sc, 7, roundStart, outcome(svcA.ID, pass), outcome(svcB.ID, fail))
+
+	for _, id := range []int64{svcA.ID, svcB.ID} {
+		cr := latestResult(t, st, id)
+		if cr.Round != 7 {
+			t.Errorf("service %d: Round = %d, want 7", id, cr.Round)
+		}
+		if !cr.Timestamp.Equal(roundStart) {
+			t.Errorf("service %d: Timestamp = %v, want the round start %v", id, cr.Timestamp, roundStart)
+		}
+	}
+}
+
+// Every result of a round is recorded and scored before the safety net looks,
+// and it looks exactly once, at the round's final state.
+func TestRecordRound_EvaluatesMassFailureOnceForTheWholeRound(t *testing.T) {
+	st, sess := openTestStore(t, 1000)
+	var ids []int64
+	for i := range 3 {
+		ids = append(ids, newService(t, st, sess.ID, fmt.Sprintf("svc-%d", i)).ID)
+	}
+	// running is consulted once per service per evaluation, so its calls
+	// count the evaluations.
+	var runningCalls int
+	running := func(int64) bool { runningCalls++; return true }
+	sc := New(st, sess.ID, fraction(0.5), WithRunning(running))
+
+	recordRound(t, sc, 1, time.Now(), outcome(ids[0], pass), outcome(ids[1], pass), outcome(ids[2], pass)) // arms
+	if evaluations := runningCalls / len(ids); evaluations != 1 {
+		t.Errorf("a round of %d results evaluated the safety net %d times, want 1", len(ids), evaluations)
+	}
+
+	recordRound(t, sc, 2, time.Now(), outcome(ids[0], fail), outcome(ids[1], fail), outcome(ids[2], pass)) // 2 of 3
+	if !scoringPaused(t, st) {
+		t.Fatal("not paused with 2 of 3 services failing at threshold 0.5")
+	}
+	if n := countEvents(t, st, sess.ID, EventMassFailureAutopause); n != 1 {
+		t.Errorf("mass_failure_autopause events = %d, want exactly 1 for the round", n)
+	}
+	// Both of the crossing round's failures are scored: the pause takes
+	// effect from the next round, not partway through this one.
+	wantScore(t, st, sess.ID, 980, 20)
+}
+
+// The round's final state is what counts, not whatever share the results pass
+// through while being written one by one.
+func TestRecordRound_MassFailureIgnoresIntermediateStatesWithinARound(t *testing.T) {
+	st, sess := openTestStore(t, 1000)
+	a := newService(t, st, sess.ID, "svc-a")
+	b := newService(t, st, sess.ID, "svc-b")
+	c := newService(t, st, sess.ID, "svc-c")
+	sc := New(st, sess.ID, fraction(0.5))
+
+	recordRound(t, sc, 1, time.Now(), outcome(a.ID, fail), outcome(b.ID, pass), outcome(c.ID, pass)) // 1 of 3: arms
+	// Written in this order, b's failure lands while a's round-1 failure is
+	// still a's latest — 2 of 3 for a moment — but by the end of the round a
+	// is back up and only 1 of 3 is failing.
+	recordRound(t, sc, 2, time.Now(), outcome(b.ID, fail), outcome(a.ID, pass), outcome(c.ID, pass))
+	if scoringPaused(t, st) {
+		t.Fatal("paused on a share the round only passed through; it ended at 1 of 3")
+	}
+	if n := countEvents(t, st, sess.ID, EventMassFailureAutopause); n != 0 {
+		t.Errorf("mass_failure_autopause events = %d, want 0", n)
+	}
+}
+
+func TestRecordRound_ArmsOnARoundBelowThresholdThenFiresOnTheNextCrossing(t *testing.T) {
+	st, sess := openTestStore(t, 1000)
+	a := newService(t, st, sess.ID, "svc-a")
+	b := newService(t, st, sess.ID, "svc-b")
+	sc := New(st, sess.ID, fraction(0.5))
+
+	recordRound(t, sc, 1, time.Now(), outcome(a.ID, pass), outcome(b.ID, pass))
+	if scoringPaused(t, st) {
+		t.Fatal("paused after an all-passing round")
+	}
+	recordRound(t, sc, 2, time.Now(), outcome(a.ID, fail), outcome(b.ID, fail))
+	if !scoringPaused(t, st) {
+		t.Fatal("not paused on the round that crossed the threshold after an arming round")
+	}
+	if n := countEvents(t, st, sess.ID, EventMassFailureAutopause); n != 1 {
+		t.Errorf("mass_failure_autopause events = %d, want 1", n)
+	}
+
+	// Still above the threshold after the admin resumes: no new crossing, so
+	// no new pause.
+	if err := st.SetGlobalScoringPaused(false); err != nil {
+		t.Fatalf("SetGlobalScoringPaused(false): %v", err)
+	}
+	recordRound(t, sc, 3, time.Now(), outcome(a.ID, fail), outcome(b.ID, fail))
+	if scoringPaused(t, st) {
+		t.Fatal("re-paused during the same ongoing mass failure")
+	}
+}
+
+// One result that cannot be recorded must not cost the rest of the round its
+// results.
+func TestRecordRound_OneBadResultDoesNotDropTheOthers(t *testing.T) {
+	st, sess := openTestStore(t, 1000)
+	svc := newService(t, st, sess.ID, "svc-a")
+	logger, _ := quietLogger()
+	sc := New(st, sess.ID, nil, WithLogger(logger))
+
+	const missing int64 = 9999
+	err := sc.RecordRound(1, time.Now(), []checks.RoundResult{outcome(missing, fail), outcome(svc.ID, fail)})
+	if err == nil {
+		t.Fatal("RecordRound with an unknown service returned nil, want an error")
+	}
+	if cr := latestResult(t, st, svc.ID); cr.Round != 1 || cr.Success {
+		t.Errorf("result after the bad one = %+v, want a round 1 failure", cr)
+	}
+	wantScore(t, st, sess.ID, 990, 10)
+	if n := countEvents(t, st, sess.ID, EventPersistenceError); n != 1 {
+		t.Errorf("persistence_error events = %d, want 1 (for the unknown service only)", n)
+	}
 }

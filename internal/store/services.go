@@ -230,10 +230,10 @@ func (s *Store) InsertConfigSnapshot(serviceID int64, cfg config.ServiceConfig) 
 	}
 	_, err = s.db.Exec(
 		`INSERT INTO service_config_snapshots
-		 (service_id, applied_at, host, check_type, interval_seconds, points_per_failure, params_json)
-		 VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		 (service_id, applied_at, host, check_type, points_per_failure, params_json)
+		 VALUES (?, ?, ?, ?, ?, ?)`,
 		serviceID, time.Now().UTC().UnixMilli(), cfg.Host, cfg.CheckType,
-		cfg.IntervalSeconds, cfg.PointsPerFailure, string(paramsJSON),
+		cfg.PointsPerFailure, string(paramsJSON),
 	)
 	if err != nil {
 		return fmt.Errorf("store: inserting config snapshot for service %d: %w", serviceID, err)

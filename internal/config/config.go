@@ -5,7 +5,7 @@
 // Loading is cheap and side-effect free, so callers re-read the file whenever
 // they need current values: the engine validates the whole file at startup (it
 // must not run on an invalid config) and later re-reads a single service entry
-// with LoadService when a routine restarts or /reload diffs the file.
+// with LoadService when a service is (re)started or /reload diffs the file.
 //
 // Any ${VAR} in the file is replaced with that environment variable's value
 // before parsing, which is how secrets such as the admin bcrypt hash stay out
@@ -37,12 +37,12 @@ var ErrServiceNotFound = errors.New("config: service not found")
 // typo'd check_type fails at startup instead of at the first tick.
 func knownCheckTypes() []string { return checks.BuiltinTypes() }
 
-// ServiceConfig is one scored service.
+// ServiceConfig is one scored service. It has no interval of its own: every
+// service is checked once per shared round (Config.RoundIntervalSeconds).
 type ServiceConfig struct {
 	Name             string         `yaml:"name"`
 	Host             string         `yaml:"host"`
 	CheckType        string         `yaml:"check_type"`
-	IntervalSeconds  int            `yaml:"interval_seconds"`
 	PointsPerFailure int            `yaml:"points_per_failure"`
 	Params           map[string]any `yaml:"params"`
 }
@@ -58,6 +58,11 @@ type AdminConfig struct {
 type Config struct {
 	SessionName   string `yaml:"session_name"`
 	StartingScore int    `yaml:"starting_score"`
+	// RoundIntervalSeconds is the length of one scoring round: every enabled
+	// service is checked once per round, all at the same instant. It is read
+	// once at startup, so changing it takes a restart; /reload does not
+	// apply it.
+	RoundIntervalSeconds int `yaml:"round_interval_seconds"`
 	// MassFailureFraction is the share of services that must fail within one
 	// scoring window to auto-pause scoring. Nil (the field omitted) disables
 	// the safety net.
@@ -150,6 +155,9 @@ func validate(cfg *Config) error {
 	if cfg.StartingScore <= 0 {
 		return fmt.Errorf("starting_score must be a positive integer, got %d", cfg.StartingScore)
 	}
+	if cfg.RoundIntervalSeconds <= 0 {
+		return fmt.Errorf("round_interval_seconds must be a positive integer, got %d", cfg.RoundIntervalSeconds)
+	}
 	if f := cfg.MassFailureFraction; f != nil && (*f <= 0 || *f > 1) {
 		return fmt.Errorf("mass_failure_fraction must be greater than 0 and at most 1, got %v", *f)
 	}
@@ -182,9 +190,6 @@ func validate(cfg *Config) error {
 		// reject at every tick is refused here instead.
 		if err := checks.ValidateParams(svc.CheckType, svc.Params); err != nil {
 			return fmt.Errorf("service %q: params: %w", svc.Name, err)
-		}
-		if svc.IntervalSeconds <= 0 {
-			return fmt.Errorf("service %q: interval_seconds must be a positive integer, got %d", svc.Name, svc.IntervalSeconds)
 		}
 		if svc.PointsPerFailure <= 0 {
 			return fmt.Errorf("service %q: points_per_failure must be a positive integer, got %d", svc.Name, svc.PointsPerFailure)

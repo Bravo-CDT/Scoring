@@ -19,6 +19,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"time"
 )
 
 // builtin is one check type the engine ships: its implementation and the
@@ -66,9 +67,21 @@ type Result struct {
 	Detail  string
 }
 
+// RoundResult is one service's outcome for a completed scoring round, as the
+// Scheduler reports it to its ResultSink. It lives here, beside Result, so the
+// scheduler and the scorer can share it without importing each other.
+type RoundResult struct {
+	ServiceID        int64
+	PointsPerFailure int
+	Result           Result
+	Latency          time.Duration
+}
+
 // CheckFunc performs one check attempt. It must return promptly once ctx is
-// done — callers (the Scheduler) rely on this to bound a hung check at the
-// service's interval.
+// done. The Scheduler does not depend on that for correctness — it stops
+// waiting shortly after the deadline and scores the check as a failure — but
+// a CheckFunc that ignores ctx leaks its goroutine for every round it overruns,
+// until it eventually returns on its own.
 type CheckFunc func(ctx context.Context, host string, params map[string]any) Result
 
 // Registry maps check type names to their implementations. It is safe for

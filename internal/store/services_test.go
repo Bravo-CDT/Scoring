@@ -403,7 +403,6 @@ func TestInsertConfigSnapshot(t *testing.T) {
 		Name:             "apache-web",
 		Host:             "10.0.1.10",
 		CheckType:        "http",
-		IntervalSeconds:  60,
 		PointsPerFailure: 10,
 		Params:           map[string]any{"port": 80, "path": "/"},
 	}
@@ -413,18 +412,18 @@ func TestInsertConfigSnapshot(t *testing.T) {
 	}
 
 	var host, checkType, paramsJSON string
-	var interval, points int
+	var points int
 	var appliedAt int64
 	row := st.db.QueryRow(
-		`SELECT applied_at, host, check_type, interval_seconds, points_per_failure, params_json
+		`SELECT applied_at, host, check_type, points_per_failure, params_json
 		 FROM service_config_snapshots WHERE service_id = ?`, svc.ID,
 	)
-	if err := row.Scan(&appliedAt, &host, &checkType, &interval, &points, &paramsJSON); err != nil {
+	if err := row.Scan(&appliedAt, &host, &checkType, &points, &paramsJSON); err != nil {
 		t.Fatalf("querying snapshot: %v", err)
 	}
-	if host != "10.0.1.10" || checkType != "http" || interval != 60 || points != 10 {
-		t.Errorf("snapshot fields unexpected: host=%s type=%s interval=%d points=%d",
-			host, checkType, interval, points)
+	if host != "10.0.1.10" || checkType != "http" || points != 10 {
+		t.Errorf("snapshot fields unexpected: host=%s type=%s points=%d",
+			host, checkType, points)
 	}
 	if appliedAt < before || appliedAt > time.Now().Add(time.Second).UnixMilli() {
 		t.Errorf("applied_at = %d, want roughly now", appliedAt)
@@ -446,7 +445,7 @@ func TestInsertConfigSnapshot_NilParamsStoresEmptyObject(t *testing.T) {
 	sess := newSession(t, st, "comp-1")
 	svc := newService(t, st, sess.ID, "icmp-host")
 
-	cfg := config.ServiceConfig{Name: "icmp-host", Host: "10.0.1.10", CheckType: "icmp", IntervalSeconds: 30}
+	cfg := config.ServiceConfig{Name: "icmp-host", Host: "10.0.1.10", CheckType: "icmp"}
 	if err := st.InsertConfigSnapshot(svc.ID, cfg); err != nil {
 		t.Fatalf("InsertConfigSnapshot: %v", err)
 	}
@@ -474,7 +473,7 @@ func TestInsertConfigSnapshot_KeepsHistory(t *testing.T) {
 	for _, points := range []int{10, 25} {
 		cfg := config.ServiceConfig{
 			Name: "apache-web", Host: "10.0.1.10", CheckType: "http",
-			IntervalSeconds: 60, PointsPerFailure: points,
+			PointsPerFailure: points,
 		}
 		if err := st.InsertConfigSnapshot(svc.ID, cfg); err != nil {
 			t.Fatalf("InsertConfigSnapshot(%d): %v", points, err)
@@ -508,7 +507,7 @@ func TestInsertConfigSnapshot_KeepsHistory(t *testing.T) {
 func TestInsertConfigSnapshot_UnknownServiceFails(t *testing.T) {
 	st := openTemp(t)
 
-	cfg := config.ServiceConfig{Name: "apache-web", Host: "10.0.1.10", CheckType: "http", IntervalSeconds: 60}
+	cfg := config.ServiceConfig{Name: "apache-web", Host: "10.0.1.10", CheckType: "http"}
 	if err := st.InsertConfigSnapshot(424242, cfg); err == nil {
 		t.Error("InsertConfigSnapshot for a nonexistent service succeeded, want foreign-key violation")
 	}

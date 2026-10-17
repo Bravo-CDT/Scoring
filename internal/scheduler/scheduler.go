@@ -1,11 +1,20 @@
-// Package scheduler runs each scored service's check on its own self-paced
-// loop and reports every result to a ResultSink.
+// Package scheduler checks every enabled service once per shared scoring
+// round and reports each completed round to a ResultSink.
 //
-// Each service gets one goroutine that repeats: run the check under a
-// deadline equal to the service's interval, report the result, sleep for
-// whatever remains of the interval. That gives exactly one check per interval
-// per service, with no overlap, by construction. A check still running at the
-// deadline is cancelled and scored as a failure.
+// One round loop (Run) is the only authority on round numbers and timing; no
+// service keeps any round state of its own, so services cannot drift apart.
+// Each round the loop snapshots the enabled services, runs all of their checks
+// at the same instant, waits for every one of them, and hands the whole
+// round's results to the sink in one call. Starting a service only adds it to
+// the set the next snapshot is taken from, so it joins at the next round
+// boundary; stopping one mid-round removes it from the round in progress, and
+// its result is discarded.
+//
+// Every check is hard-bounded (see runCheck): it is given the round interval
+// as its deadline, and the loop stops waiting for it a short grace period
+// after that, however its CheckFunc behaves. That bound is what lets the loop
+// simply wait for all of a round's checks — one service's hung check can delay
+// a round by at most the grace period, and never blocks any other service.
 package scheduler
 
 import (
@@ -13,7 +22,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"math/rand/v2"
 	"slices"
 	"sync"
 	"time"
@@ -22,98 +30,248 @@ import (
 	"github.com/Bravo-CDT/Scoring/internal/config"
 )
 
-// maxStagger bounds the random delay before a routine's first check, so
-// services started together don't all hit the single-writer store at once.
-const maxStagger = 5 * time.Second
+// checkGrace is how long runCheck keeps waiting for a check after its
+// deadline before giving up on it and reporting a failure.
+const checkGrace = 100 * time.Millisecond
 
-// ResultSink is how the Scheduler reports a finished check. Implemented by the
-// Scorer.
+// ResultSink is how the Scheduler reports a completed round. Implemented by
+// the Scorer.
+//
+// RecordRound is called from the round loop, one round at a time, never
+// concurrently. results holds one entry per service checked in the round, in
+// ascending service ID order; roundStart is the instant every one of those
+// checks began. The sink must not call StopService or RestartService: those
+// wait for an in-progress RecordRound to finish, so calling them from inside
+// one would wait forever.
 type ResultSink interface {
-	Record(serviceID int64, pointsPerFailure int, result checks.Result, latency time.Duration) error
+	RecordRound(round int, roundStart time.Time, results []checks.RoundResult) error
 }
 
-// routine is one running service loop.
-type routine struct {
-	cancel context.CancelFunc
-	done   chan struct{} // closed when the loop's goroutine has exited
+// enabledService is one service the next round will check, with the config
+// it was started with.
+type enabledService struct {
+	name string
+	cfg  config.ServiceConfig
+	fn   checks.CheckFunc
 }
 
-// Scheduler owns the per-service check routines. It is safe for concurrent
-// use.
+// Scheduler owns the set of enabled services and the round loop that checks
+// them. It is safe for concurrent use.
 type Scheduler struct {
-	registry   *checks.Registry
-	sink       ResultSink
-	configPath string
+	registry      *checks.Registry
+	sink          ResultSink
+	configPath    string
+	roundInterval time.Duration
 
-	// intervalUnit is the length of one configured interval_second. Always
-	// time.Second outside tests.
-	intervalUnit time.Duration
-
-	// mu guards stagger, routines and opLocks. It is only ever held briefly:
-	// never across config loading or while waiting for a routine to exit.
-	mu sync.Mutex
-	// stagger picks the delay before a routine's first check.
-	stagger  func() time.Duration
-	routines map[int64]*routine
+	// mu guards enabled, inRound and opLocks. Holding one lock for both
+	// enabled and inRound is what makes StopService atomic with respect to a
+	// round's start and end: a service is either in a round's snapshot and
+	// still in inRound when the round ends, or its result is discarded. mu is
+	// only ever held briefly, never across config loading, a check, or the
+	// sink.
+	mu      sync.Mutex
+	enabled map[int64]enabledService
+	// inRound holds, for each service whose check is part of the round in
+	// progress, the cancel func of that check's context. Membership also
+	// means "still counts for this round": StopService deletes the entry to
+	// mean both at once.
+	inRound map[int64]context.CancelFunc
 	// opLocks serializes Start/Stop/Restart per service ID, so a
-	// check-then-launch or a stop-then-wait is atomic with respect to other
-	// operations on the same service, without blocking other services.
+	// check-then-enable is atomic with respect to other operations on the same
+	// service, without blocking other services.
 	opLocks map[int64]*sync.Mutex
+
+	// recordMu is held by the round loop from the moment a round ends until
+	// the sink has recorded it, and StopService waits on it, so once
+	// StopService returns no result of that service is recorded any more —
+	// not even one from a round that ended just before the stop.
+	recordMu sync.Mutex
+
+	statusMu    sync.Mutex
+	lastRound   int
+	nextRoundAt time.Time
 }
 
 // New returns a Scheduler that runs checks from registry, reports to sink,
-// and reads each service's settings from the config file at configPath.
-func New(registry *checks.Registry, sink ResultSink, configPath string) *Scheduler {
+// reads each service's settings from the config file at configPath, and
+// starts a round every roundInterval. Nothing is checked until Run is called.
+func New(registry *checks.Registry, sink ResultSink, configPath string, roundInterval time.Duration) *Scheduler {
 	return &Scheduler{
-		registry:     registry,
-		sink:         sink,
-		configPath:   configPath,
-		stagger:      randomStagger(maxStagger),
-		intervalUnit: time.Second,
-		routines:     make(map[int64]*routine),
-		opLocks:      make(map[int64]*sync.Mutex),
+		registry:      registry,
+		sink:          sink,
+		configPath:    configPath,
+		roundInterval: roundInterval,
+		enabled:       make(map[int64]enabledService),
+		inRound:       make(map[int64]context.CancelFunc),
+		opLocks:       make(map[int64]*sync.Mutex),
 	}
 }
 
-// SetMaxStagger changes the bound on the random delay before each newly
-// started routine's first check (5s by default); zero or less removes the
-// delay. It is a tuning and test hook — packages built on the Scheduler use it
-// to make their tests' first checks immediate — and is safe to call at any
-// time. Routines already started keep the delay they drew.
-func (s *Scheduler) SetMaxStagger(limit time.Duration) {
+// Run starts the round loop, numbering its first round firstRound, and
+// returns a channel that is closed once the loop has exited. The loop runs
+// until ctx is cancelled; a round in progress at that point is abandoned, not
+// recorded. Call Run once. The caller must wait on the returned channel
+// before closing anything the sink uses.
+//
+// A round is only counted, and its number used up, when at least one of its
+// results reaches the sink. While no service is enabled the loop keeps
+// ticking at the round interval, so a newly started service is first checked
+// at the next tick.
+func (s *Scheduler) Run(ctx context.Context, firstRound int) <-chan struct{} {
+	s.statusMu.Lock()
+	s.lastRound = firstRound - 1
+	s.statusMu.Unlock()
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		round := firstRound
+		for {
+			start := time.Now()
+			if s.runRound(ctx, round, start) {
+				round++
+			}
+			if !sleep(ctx, time.Until(start.Add(s.roundInterval))) {
+				return
+			}
+		}
+	}()
+	return done
+}
+
+// runRound runs one round that began at start and reports it to the sink as
+// round number round, returning whether it did (false for a round with
+// nothing to report, or one abandoned because ctx was cancelled).
+func (s *Scheduler) runRound(ctx context.Context, round int, start time.Time) bool {
+	batch, ctxs := s.beginRound(ctx)
+	var results []checks.RoundResult
+	if len(batch) > 0 {
+		results = s.runChecks(ctxs, batch)
+	}
+
+	s.recordMu.Lock()
+	defer s.recordMu.Unlock()
+	stillIn := s.endRound()
+	if ctx.Err() != nil {
+		return false
+	}
+	// A service stopped while its check was running is left out entirely:
+	// its check was cancelled by the stop, so the outcome is ours, not the
+	// service's.
+	results = slices.DeleteFunc(results, func(r checks.RoundResult) bool { return !stillIn[r.ServiceID] })
+	if len(results) == 0 {
+		return false
+	}
+
+	// The sink owns reporting its own failures (the Scorer logs each one and
+	// records an event); a write that failed must not stop the next round.
+	_ = s.sink.RecordRound(round, start, results)
+	s.setRoundStatus(round, start)
+	return true
+}
+
+// beginRound snapshots the enabled services as this round's batch and, under
+// the same lock, marks each of them as in the round with a context of its own
+// for StopService to cancel.
+func (s *Scheduler) beginRound(ctx context.Context) (map[int64]enabledService, map[int64]context.Context) {
 	s.mu.Lock()
-	s.stagger = randomStagger(limit)
-	s.mu.Unlock()
-}
-
-// randomStagger returns a delay picker uniform over [0, limit), or one that
-// always returns 0 for a non-positive limit.
-func randomStagger(limit time.Duration) func() time.Duration {
-	if limit <= 0 {
-		return func() time.Duration { return 0 }
+	defer s.mu.Unlock()
+	batch := make(map[int64]enabledService, len(s.enabled))
+	ctxs := make(map[int64]context.Context, len(s.enabled))
+	for id, svc := range s.enabled {
+		checkCtx, cancel := context.WithCancel(ctx)
+		batch[id] = svc
+		ctxs[id] = checkCtx
+		s.inRound[id] = cancel
 	}
-	return func() time.Duration { return rand.N(limit) }
+	return batch, ctxs
 }
 
-// StartService is idempotent: if serviceID is already running, it's a no-op.
+// endRound ends the round in progress: it returns the services still part of
+// it (those not stopped since beginRound) and releases every check context.
+func (s *Scheduler) endRound() map[int64]bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	stillIn := make(map[int64]bool, len(s.inRound))
+	for id, cancel := range s.inRound {
+		stillIn[id] = true
+		cancel()
+	}
+	clear(s.inRound)
+	return stillIn
+}
+
+// runChecks runs every service in batch concurrently, each under its own
+// context from ctxs, and returns their results in ascending service ID order.
+// It returns once every check has: runCheck bounds each one at the round
+// interval plus checkGrace, whatever its CheckFunc does.
+func (s *Scheduler) runChecks(ctxs map[int64]context.Context, batch map[int64]enabledService) []checks.RoundResult {
+	var (
+		mu      sync.Mutex
+		results = make([]checks.RoundResult, 0, len(batch))
+		wg      sync.WaitGroup
+	)
+	for id, svc := range batch {
+		wg.Go(func() {
+			start := time.Now()
+			result := runCheck(ctxs[id], s.roundInterval, svc.fn, svc.cfg.Host, svc.cfg.Params)
+			r := checks.RoundResult{
+				ServiceID:        id,
+				PointsPerFailure: svc.cfg.PointsPerFailure,
+				Result:           result,
+				Latency:          time.Since(start),
+			}
+			mu.Lock()
+			results = append(results, r)
+			mu.Unlock()
+		})
+	}
+	wg.Wait()
+	slices.SortFunc(results, func(a, b checks.RoundResult) int { return cmp.Compare(a.ServiceID, b.ServiceID) })
+	return results
+}
+
+// RoundStatus returns the number of the last round recorded and when the next
+// round is due. Before any round of this process is recorded, round is the
+// last one before Run's firstRound and nextRoundAt is the zero time. While no
+// service is enabled both stay at their last values: an idle loop does not
+// advance the round.
+func (s *Scheduler) RoundStatus() (round int, nextRoundAt time.Time) {
+	s.statusMu.Lock()
+	defer s.statusMu.Unlock()
+	return s.lastRound, s.nextRoundAt
+}
+
+// setRoundStatus records that round, which began at start, has been recorded.
+// A round that overran its interval is followed immediately, so the next one
+// is due no earlier than now.
+func (s *Scheduler) setRoundStatus(round int, start time.Time) {
+	next := start.Add(s.roundInterval)
+	if now := time.Now(); next.Before(now) {
+		next = now
+	}
+	s.statusMu.Lock()
+	s.lastRound = round
+	s.nextRoundAt = next
+	s.statusMu.Unlock()
+}
+
+// StartService is idempotent: if serviceID is already enabled, it's a no-op.
 // Otherwise it loads this service's entry fresh from the config file, looks
-// up its check_type in the registry, and launches its self-paced loop.
+// up its check_type in the registry, and enables it from the next round on —
+// never the round already in progress.
 func (s *Scheduler) StartService(serviceID int64, name string) error {
 	unlock := s.lockService(serviceID)
 	defer unlock()
 	return s.start(serviceID, name)
 }
 
-// StopService is idempotent and synchronous: it blocks until the routine's
-// goroutine has fully exited before returning. A check in flight when Stop is
-// called is cancelled and its result discarded.
-//
-// Because it waits for the routine, it returns only once the in-flight
-// CheckFunc honours its cancelled ctx; a check that ignores ctx holds it up
-// until the check returns on its own. For the same reason the ResultSink must
-// never call StopService or RestartService for the service whose result it is
-// recording: that call runs on the routine's own goroutine and would wait
-// forever for itself to exit.
+// StopService is idempotent. The service is left out of every round from
+// now on, including the one in progress: its check, if running, is cancelled
+// and its result discarded. It does not wait for that check to return, but
+// if the round loop is just recording a round that already ended, it waits
+// for that, so once StopService returns no further result for the service
+// is recorded.
 func (s *Scheduler) StopService(serviceID int64) {
 	unlock := s.lockService(serviceID)
 	defer unlock()
@@ -121,13 +279,9 @@ func (s *Scheduler) StopService(serviceID int64) {
 }
 
 // RestartService stops the service (if running) then starts it, always
-// re-reading the config file — this is how a config edit takes effect. If the
-// fresh config cannot be loaded, the service is left stopped and the error is
-// returned.
-//
-// Its stop half blocks exactly as StopService does: until the in-flight
-// CheckFunc honours ctx, and forever if called by the ResultSink for the
-// service it is recording.
+// re-reading the config file — this is how a config edit takes effect, from
+// the next round on. If the fresh config cannot be loaded, the service is left
+// stopped and the error is returned.
 func (s *Scheduler) RestartService(serviceID int64, name string) error {
 	unlock := s.lockService(serviceID)
 	defer unlock()
@@ -135,21 +289,21 @@ func (s *Scheduler) RestartService(serviceID int64, name string) error {
 	return s.start(serviceID, name)
 }
 
-// IsRunning reports whether serviceID has a routine. A routine being stopped
-// counts as running until its goroutine has exited.
+// IsRunning reports whether serviceID is enabled, i.e. will be checked in the
+// next round.
 func (s *Scheduler) IsRunning(serviceID int64) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	_, ok := s.routines[serviceID]
+	_, ok := s.enabled[serviceID]
 	return ok
 }
 
-// RunningServiceIDs returns the IDs of all running services, in ascending
+// RunningServiceIDs returns the IDs of all enabled services, in ascending
 // order.
 func (s *Scheduler) RunningServiceIDs() []int64 {
 	s.mu.Lock()
-	ids := make([]int64, 0, len(s.routines))
-	for id := range s.routines {
+	ids := make([]int64, 0, len(s.enabled))
+	for id := range s.enabled {
 		ids = append(ids, id)
 	}
 	s.mu.Unlock()
@@ -170,8 +324,8 @@ func (s *Scheduler) lockService(serviceID int64) (unlock func()) {
 	return l.Unlock
 }
 
-// start launches serviceID's routine unless it is already running. The caller
-// must hold serviceID's operation lock.
+// start enables serviceID unless it is already enabled. The caller must hold
+// serviceID's operation lock.
 func (s *Scheduler) start(serviceID int64, name string) error {
 	if s.IsRunning(serviceID) {
 		return nil
@@ -184,84 +338,84 @@ func (s *Scheduler) start(serviceID int64, name string) error {
 	if !ok {
 		return fmt.Errorf("scheduler: service %q: no check registered for check_type %q", name, cfg.CheckType)
 	}
-
-	ctx, cancel := context.WithCancel(context.Background())
-	r := &routine{cancel: cancel, done: make(chan struct{})}
 	s.mu.Lock()
-	delay := s.stagger()
-	s.routines[serviceID] = r
+	s.enabled[serviceID] = enabledService{name: name, cfg: *cfg, fn: fn}
 	s.mu.Unlock()
-
-	go s.run(ctx, r.done, delay, serviceID, *cfg, fn)
 	return nil
 }
 
-// stop cancels serviceID's routine, if any, and waits for it to exit. The
-// caller must hold serviceID's operation lock.
+// stop disables serviceID and drops it from the round in progress, if it is
+// part of it, then waits out any round being recorded. The caller must hold
+// serviceID's operation lock.
 func (s *Scheduler) stop(serviceID int64) {
 	s.mu.Lock()
-	r, ok := s.routines[serviceID]
+	delete(s.enabled, serviceID)
+	cancel, inRound := s.inRound[serviceID]
+	delete(s.inRound, serviceID)
 	s.mu.Unlock()
-	if !ok {
-		return
+	if inRound {
+		cancel()
 	}
-	r.cancel()
-	<-r.done
-	s.mu.Lock()
-	delete(s.routines, serviceID)
-	s.mu.Unlock()
+	// A round that ended before the stop may hold this service's result and
+	// be recording it right now; that result is legitimately the service's,
+	// but it must land before StopService returns, not after.
+	s.recordMu.Lock()
+	s.recordMu.Unlock()
 }
 
-// run is one service's loop: it waits out the startup stagger delay, then
-// checks once per interval. It returns only when ctx is cancelled.
-func (s *Scheduler) run(ctx context.Context, done chan<- struct{}, delay time.Duration, serviceID int64, cfg config.ServiceConfig, fn checks.CheckFunc) {
-	defer close(done)
-
-	if !sleep(ctx, delay) {
-		return
-	}
-	interval := time.Duration(cfg.IntervalSeconds) * s.intervalUnit
-	for {
-		start := time.Now()
-		result := runCheck(ctx, interval, fn, cfg.Host, cfg.Params)
-		latency := time.Since(start)
-		if ctx.Err() != nil {
-			// Stopped mid-check: the cancellation is ours, not the
-			// service's fault, so don't score it.
-			return
-		}
-
-		// A sink error must never stop this service's loop — one bad write
-		// shouldn't end checking for the rest of the competition. The sink
-		// owns logging its own failures.
-		_ = s.sink.Record(serviceID, cfg.PointsPerFailure, result, latency)
-
-		if !sleep(ctx, interval-time.Since(start)) {
-			return
-		}
-	}
-}
-
-// runCheck runs fn under a deadline of timeout. A check still running at the
-// deadline, or one that panics, is reported as a failure.
-func runCheck(ctx context.Context, timeout time.Duration, fn checks.CheckFunc, host string, params map[string]any) (result checks.Result) {
+// runCheck runs fn under a deadline of timeout and returns its result, or a
+// failure if fn panics, runs past the deadline, or does not return within
+// checkGrace of the deadline. It always returns by then, which is what lets
+// the round loop wait for every check of a round.
+//
+// fn runs on a goroutine of its own so that runCheck can stop waiting for it.
+// A CheckFunc that ignores its ctx (which checks.CheckFunc forbids) therefore
+// leaks that goroutine, once per round it overruns, until it returns on its
+// own; no shipped check does.
+func runCheck(ctx context.Context, timeout time.Duration, fn checks.CheckFunc, host string, params map[string]any) checks.Result {
 	checkCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-	defer func() {
-		if p := recover(); p != nil {
-			result = checks.Result{Success: false, Detail: fmt.Sprintf("check panicked: %v", p)}
-		}
+
+	// Buffered, so a check that returns after runCheck has given up can
+	// still send and exit.
+	done := make(chan checks.Result, 1)
+	go func() {
+		defer func() {
+			if p := recover(); p != nil {
+				done <- checks.Result{Success: false, Detail: fmt.Sprintf("check panicked: %v", p)}
+			}
+		}()
+		done <- fn(checkCtx, host, params)
 	}()
 
-	result = fn(checkCtx, host, params)
-	if errors.Is(checkCtx.Err(), context.DeadlineExceeded) {
-		detail := fmt.Sprintf("check timed out after %s", timeout)
-		if result.Detail != "" {
-			detail += ": " + result.Detail
+	select {
+	case result := <-done:
+		return withTimeoutDetail(checkCtx, timeout, result)
+	case <-checkCtx.Done():
+		select {
+		case result := <-done:
+			return withTimeoutDetail(checkCtx, timeout, result)
+		case <-time.After(checkGrace):
+			return checks.Result{
+				Success: false,
+				Detail:  fmt.Sprintf("check did not return within %s of its %s deadline", checkGrace, timeout),
+			}
 		}
-		result = checks.Result{Success: false, Detail: detail}
 	}
-	return result
+}
+
+// withTimeoutDetail turns result into a failure if checkCtx's deadline
+// passed, whatever the check claimed: a check that only answered after its
+// deadline did not answer in time.
+func withTimeoutDetail(checkCtx context.Context, timeout time.Duration, result checks.Result) checks.Result {
+	if !errors.Is(checkCtx.Err(), context.DeadlineExceeded) {
+		return result
+	}
+	detail := fmt.Sprintf("check timed out after %s", timeout)
+	if result.Detail != "" {
+		detail += ": " + result.Detail
+	}
+	return checks.Result{Success: false, Detail: detail}
 }
 
 // sleep waits for d or until ctx is done, reporting whether it slept the full

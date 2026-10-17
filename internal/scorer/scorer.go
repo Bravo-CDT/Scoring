@@ -30,27 +30,27 @@ const (
 	SourceServiceCheck = "service_check"
 )
 
-// Scorer applies the scoring rules to check results for one session. It is
-// safe for concurrent use by the Scheduler's per-service routines. The pause
-// flags and previous results are read from the store on every call, so admin
-// changes take effect on the next result; the only state it keeps itself is
-// whether the mass-failure safety net is armed (see checkMassFailure).
+// Scorer applies the scoring rules to check results for one session, one
+// scoring round at a time. The pause flags and previous results are read from
+// the store on every call, so admin changes take effect on the next round; the
+// only state it keeps itself is whether the mass-failure safety net is armed
+// (see checkMassFailure).
 //
-// Record assumes results for any one service arrive one at a time, as the
-// Scheduler guarantees; transition detection compares against the service's
-// previous stored result.
+// RecordRound assumes rounds arrive one at a time, as the Scheduler's single
+// round loop guarantees: transition detection compares each result against
+// its service's previous stored result.
 type Scorer struct {
 	store               *store.Store
 	sessionID           int64
 	massFailureFraction *float64
-	// running reports whether a service's check routine is running; nil
+	// running reports whether a service is enabled in the Scheduler; nil
 	// means every active service counts for the mass-failure check.
 	running func(serviceID int64) bool
 	logger  *log.Logger
 
-	// massMu serializes the mass-failure evaluation and guards armed, so
-	// services that cross the threshold together produce one autopause event,
-	// not one each.
+	// massMu serializes the mass-failure evaluation and guards armed. The
+	// Scheduler never overlaps RecordRound calls, but the safety net must not
+	// double-fire even for a caller that does.
 	massMu sync.Mutex
 	// armed is set when an evaluation sees the failing share below the
 	// threshold and cleared when the autopause fires: the safety net fires on
@@ -61,11 +61,11 @@ type Scorer struct {
 // Option configures a Scorer.
 type Option func(*Scorer)
 
-// WithRunning restricts the mass-failure check to services whose check
-// routine is running, as reported by running (the Scheduler's IsRunning). A
-// stopped routine's last result is stale, so without this a service an admin
-// stopped while it was down would count as failing for the rest of the
-// competition. running must not call back into the Scorer.
+// WithRunning restricts the mass-failure check to services the Scheduler is
+// running, as reported by running (the Scheduler's IsRunning). A stopped
+// service's last result is stale, so without this a service an admin stopped
+// while it was down would count as failing for the rest of the competition.
+// running must not call back into the Scorer.
 func WithRunning(running func(serviceID int64) bool) Option {
 	return func(sc *Scorer) { sc.running = running }
 }
@@ -87,28 +87,45 @@ func New(st *store.Store, sessionID int64, massFailureFraction *float64, opts ..
 	return sc
 }
 
-// Record stores one check result for serviceID and applies the scoring rules
-// to it. It satisfies scheduler.ResultSink.
+// RecordRound stores every result of one scoring round and applies the
+// scoring rules to them. It satisfies scheduler.ResultSink.
 //
-// Once the result itself is stored, the remaining steps (transition event,
-// ledger entry, mass-failure check) are each attempted even if an earlier one
-// fails, so a failed event write never costs a score; their errors are
-// returned joined.
+// Every result is stored with round as its round number and roundStart as its
+// timestamp, so all of a round's rows share one instant. Each result is
+// recorded and scored on its own: one that fails does not stop the others.
+// Within a result, once the result itself is stored, the transition event and
+// ledger entry are each attempted even if the other fails, so a failed event
+// write never costs a score.
 //
-// The Scheduler has nothing useful to do with an error, so Record also reports
-// every one itself: it logs it, then makes a best-effort persistence_error
-// event (which a full disk may refuse too; that is logged and left there).
-func (sc *Scorer) Record(serviceID int64, pointsPerFailure int, result checks.Result, latency time.Duration) error {
-	err := sc.record(serviceID, pointsPerFailure, result, latency)
-	if err != nil {
-		sc.reportFailure(serviceID, err)
+// The mass-failure safety net is evaluated once, after the whole round is
+// recorded, against the round's final state. So every failure of the round
+// that crosses the threshold is scored, and the pause takes effect from the
+// next round on.
+//
+// The Scheduler has nothing useful to do with an error, so RecordRound also
+// reports every per-result one itself: it logs it, then makes a best-effort
+// persistence_error event (which a full disk may refuse too; that is logged
+// and left there). All errors are returned joined.
+func (sc *Scorer) RecordRound(round int, roundStart time.Time, results []checks.RoundResult) error {
+	var errs []error
+	for _, r := range results {
+		if err := sc.recordOne(round, roundStart, r); err != nil {
+			sc.reportFailure(r.ServiceID, err)
+			errs = append(errs, err)
+		}
 	}
-	return err
+	// Passing rounds are evaluated too: seeing the share below the threshold
+	// is what arms the safety net.
+	if err := sc.checkMassFailure(); err != nil {
+		sc.logger.Printf("scorer: round %d: %v", round, err)
+		errs = append(errs, err)
+	}
+	return errors.Join(errs...)
 }
 
-// reportFailure logs err, a failed Record of serviceID, and tries to add it to
-// the event log. The event's message is fixed text because events are public;
-// the error, which can name internals, goes in the detail.
+// reportFailure logs err, a failed recording of serviceID's result, and tries
+// to add it to the event log. The event's message is fixed text because events
+// are public; the error, which can name internals, goes in the detail.
 func (sc *Scorer) reportFailure(serviceID int64, err error) {
 	sc.logger.Printf("scorer: recording result for service %d: %v", serviceID, err)
 	evErr := sc.store.InsertEvent(store.Event{
@@ -126,7 +143,9 @@ func (sc *Scorer) reportFailure(serviceID int64, err error) {
 	}
 }
 
-func (sc *Scorer) record(serviceID int64, pointsPerFailure int, result checks.Result, latency time.Duration) error {
+// recordOne stores r as serviceID's result for round and scores it.
+func (sc *Scorer) recordOne(round int, roundStart time.Time, r checks.RoundResult) error {
+	serviceID, result := r.ServiceID, r.Result
 	svc, err := sc.store.GetService(serviceID)
 	if err != nil {
 		return fmt.Errorf("scorer: loading service %d: %w", serviceID, err)
@@ -139,9 +158,10 @@ func (sc *Scorer) record(serviceID int64, pointsPerFailure int, result checks.Re
 	resultID, err := sc.store.InsertCheckResult(store.CheckResult{
 		SessionID: sc.sessionID,
 		ServiceID: serviceID,
-		Timestamp: time.Now().UTC(),
+		Round:     round,
+		Timestamp: roundStart.UTC(),
 		Success:   result.Success,
-		LatencyMS: latency.Milliseconds(),
+		LatencyMS: r.Latency.Milliseconds(),
 		Detail:    result.Detail,
 	})
 	if err != nil {
@@ -153,11 +173,8 @@ func (sc *Scorer) record(serviceID int64, pointsPerFailure int, result checks.Re
 		errs = append(errs, sc.recordTransition(svc, result))
 	}
 	if !result.Success {
-		errs = append(errs, sc.scoreFailure(svc, resultID, pointsPerFailure))
+		errs = append(errs, sc.scoreFailure(svc, resultID, r.PointsPerFailure))
 	}
-	// Passes are evaluated too: seeing the share below the threshold is what
-	// arms the safety net.
-	errs = append(errs, sc.checkMassFailure())
 	return errors.Join(errs...)
 }
 
@@ -275,7 +292,7 @@ func (sc *Scorer) checkMassFailure() error {
 }
 
 // countOutcomes returns how many services the mass-failure check considers —
-// active ones whose routine is running, or every active one without a running
+// active ones the Scheduler is running, or every active one without a running
 // callback — and how many of those are failing. A service with no result yet
 // is counted and is not failing.
 func (sc *Scorer) countOutcomes() (considered, failing int, err error) {

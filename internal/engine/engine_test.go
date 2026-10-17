@@ -42,7 +42,6 @@ func svcYAML(name string, pointsPerFailure int) string {
   - name: %s
     host: 127.0.0.1
     check_type: tcp_connect
-    interval_seconds: 1
     points_per_failure: %d
     params: {port: 9}
 `, name, pointsPerFailure)
@@ -62,6 +61,7 @@ func configWithServices(services string) string {
 	return fmt.Sprintf(`
 session_name: "comp-1"
 starting_score: 1000
+round_interval_seconds: 1
 admin:
   username: admin
   password_hash: %q
@@ -86,10 +86,22 @@ func failCheck(context.Context, string, map[string]any) checks.Result {
 	return checks.Result{Success: false, Detail: "connection refused"}
 }
 
+// testRound is the harness scheduler's round interval: short, so a started
+// service is checked within milliseconds.
+const testRound = 20 * time.Millisecond
+
 // newHarness writes a config with services, creates their rows the way
-// startup does, and returns an engine whose checks run check with no startup
-// stagger. The engine is stopped and the store closed when the test ends.
+// startup does, and returns an engine whose checks run check in testRound
+// rounds. The round loop and the engine are stopped and the store closed when
+// the test ends.
 func newHarness(t *testing.T, check checks.CheckFunc, services ...string) *harness {
+	t.Helper()
+	return newHarnessWithSink(t, check, nil, services...)
+}
+
+// newHarnessWithSink is newHarness with the scheduler reporting to
+// wrap(scorer) instead of straight to the scorer, when wrap is non-nil.
+func newHarnessWithSink(t *testing.T, check checks.CheckFunc, wrap func(scheduler.ResultSink) scheduler.ResultSink, services ...string) *harness {
 	t.Helper()
 	dir := t.TempDir()
 	h := &harness{
@@ -117,11 +129,19 @@ func newHarness(t *testing.T, check checks.CheckFunc, services ...string) *harne
 
 	registry := checks.NewRegistry()
 	registry.Register("tcp_connect", check)
-	sched := scheduler.New(registry, scorer.New(st, h.sess.ID, nil), h.configPath)
-	sched.SetMaxStagger(0)
+	var sink scheduler.ResultSink = scorer.New(st, h.sess.ID, nil)
+	if wrap != nil {
+		sink = wrap(sink)
+	}
+	sched := scheduler.New(registry, sink, h.configPath, testRound)
 	h.e = New(st, h.sess, sched, h.configPath)
 	// Registered after the store's Close, so it runs first.
 	t.Cleanup(func() { h.e.Stop() })
+	// Registered last, so it runs first: as in app.Close, the round loop is
+	// gone before anything it records into is torn down.
+	ctx, cancel := context.WithCancel(context.Background())
+	done := sched.Run(ctx, 1)
+	t.Cleanup(func() { cancel(); <-done })
 	return h
 }
 
@@ -336,7 +356,6 @@ func TestReload_ReportsAddedRoutinesThatFailToStart(t *testing.T) {
   - name: svc3
     host: 127.0.0.1
     check_type: http
-    interval_seconds: 1
     points_per_failure: 10
     params: {port: 80}
 `))
@@ -672,31 +691,43 @@ func TestPauseAndResumeScoring(t *testing.T) {
 	}
 }
 
+// stuckSink is a ResultSink whose first RecordRound signals inRecord and then
+// blocks until release is closed, before passing the round on.
+type stuckSink struct {
+	inner    scheduler.ResultSink
+	once     sync.Once
+	inRecord chan struct{}
+	release  chan struct{}
+}
+
+func (s *stuckSink) RecordRound(round int, roundStart time.Time, results []checks.RoundResult) error {
+	s.once.Do(func() {
+		close(s.inRecord)
+		<-s.release
+	})
+	return s.inner.RecordRound(round, roundStart, results)
+}
+
 // TestScoringPausesNotBlockedByStuckControlOp: pausing scoring is the admin's
 // emergency lever, so it must work even while another control operation is
-// stuck — here a StopService waiting on a check that ignores cancellation.
+// stuck — here a StopService waiting for a round that is stuck being
+// recorded.
 func TestScoringPausesNotBlockedByStuckControlOp(t *testing.T) {
 	release := make(chan struct{})
 	var releaseOnce sync.Once
 	unblock := func() { releaseOnce.Do(func() { close(release) }) }
-	inCheck := make(chan struct{}, 1)
-	stuckCheck := func(context.Context, string, map[string]any) checks.Result {
-		select {
-		case inCheck <- struct{}{}:
-		default:
-		}
-		<-release // deliberately ignores ctx
-		return checks.Result{Success: true}
-	}
-	h := newHarness(t, stuckCheck, "svc1")
-	// Runs before the harness's e.Stop cleanup, which would otherwise hang.
+	inRecord := make(chan struct{})
+	h := newHarnessWithSink(t, okCheck, func(inner scheduler.ResultSink) scheduler.ResultSink {
+		return &stuckSink{inner: inner, inRecord: inRecord, release: release}
+	}, "svc1")
+	// Runs before the harness's cleanups, which would otherwise hang.
 	t.Cleanup(unblock)
 
 	h.start(t)
 	select {
-	case <-inCheck:
+	case <-inRecord:
 	case <-time.After(waitTimeout):
-		t.Fatal("check never started")
+		t.Fatal("no round was ever recorded")
 	}
 
 	stopDone := make(chan error, 1)
@@ -731,7 +762,7 @@ func TestScoringPausesNotBlockedByStuckControlOp(t *testing.T) {
 	}
 	select {
 	case <-stopDone:
-		t.Fatal("StopService finished before the check was released; the test proved nothing")
+		t.Fatal("StopService finished before the round was released; the test proved nothing")
 	default:
 	}
 
@@ -740,7 +771,7 @@ func TestScoringPausesNotBlockedByStuckControlOp(t *testing.T) {
 	case err := <-stopDone:
 		mustDo(t, "StopService", err)
 	case <-time.After(waitTimeout):
-		t.Fatal("StopService did not finish after the check was released")
+		t.Fatal("StopService did not finish after the round was released")
 	}
 }
 

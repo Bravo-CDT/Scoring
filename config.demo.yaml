@@ -4,6 +4,7 @@
 # per-field reference.
 session_name: "demo"
 starting_score: 1000
+round_interval_seconds: 5
 mass_failure_fraction: 0.6
 
 admin:
@@ -14,7 +15,6 @@ services:
   - name: web
     host: 127.0.0.1
     check_type: http
-    interval_seconds: 5
     points_per_failure: 10
     params:
       port: 18081
@@ -25,7 +25,6 @@ services:
   - name: api
     host: 127.0.0.1
     check_type: http
-    interval_seconds: 5
     points_per_failure: 5
     params:
       port: 18082
@@ -33,7 +32,6 @@ services:
   - name: ssh
     host: 127.0.0.1
     check_type: tcp_connect
-    interval_seconds: 5
     points_per_failure: 20
     params:
       port: 18083

@@ -40,7 +40,7 @@ func TestOpen_CreatesSchema(t *testing.T) {
 	queries := map[string]string{
 		"sessions":                 `SELECT COUNT(*) FROM sessions WHERE name = '' AND starting_score = 0 AND created_at = 0`,
 		"services":                 `SELECT COUNT(*) FROM services WHERE session_id = 0 AND name = '' AND active = 0 AND scoring_paused = 0 AND created_at = 0`,
-		"service_config_snapshots": `SELECT COUNT(*) FROM service_config_snapshots WHERE service_id = 0 AND applied_at = 0 AND host = '' AND check_type = '' AND interval_seconds = 0 AND points_per_failure = 0 AND params_json = ''`,
+		"service_config_snapshots": `SELECT COUNT(*) FROM service_config_snapshots WHERE service_id = 0 AND applied_at = 0 AND host = '' AND check_type = '' AND points_per_failure = 0 AND params_json = ''`,
 		"check_results":            `SELECT COUNT(*) FROM check_results WHERE session_id = 0 AND service_id = 0 AND timestamp = 0 AND success = 0 AND latency_ms = 0 AND detail = '' AND round = 0`,
 		"ledger_entries":           `SELECT COUNT(*) FROM ledger_entries WHERE session_id = 0 AND timestamp = 0 AND source_type = '' AND source_ref = 0 AND from_side = '' AND to_side = '' AND nominal_points = 0 AND points = 0 AND voided = 0 AND voided_at IS NULL AND voided_reason IS NULL AND reason = ''`,
 		"events":                   `SELECT COUNT(*) FROM events WHERE session_id = 0 AND service_id IS NULL AND level = '' AND actor = '' AND type = '' AND message = '' AND detail = '' AND timestamp = 0`,

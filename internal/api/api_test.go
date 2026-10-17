@@ -47,6 +47,7 @@ func configYAML(names ...string) string {
 	fmt.Fprintf(&b, `
 session_name: "comp-1"
 starting_score: 1000
+round_interval_seconds: 1
 admin:
   username: %s
   password_hash: %q
@@ -56,7 +57,6 @@ services:
 		fmt.Fprintf(&b, `  - name: %s
     host: 127.0.0.1
     check_type: tcp_connect
-    interval_seconds: 1
     points_per_failure: 10
     params: {port: 9}
 `, n)
@@ -100,6 +100,10 @@ func failCheck(context.Context, string, map[string]any) checks.Result {
 	return checks.Result{Success: false, Detail: "connection refused"}
 }
 
+// testRound is the harness scheduler's round interval: short, so a started
+// service is checked within milliseconds.
+const testRound = 20 * time.Millisecond
+
 // newHarness builds the full stack (store, scorer, scheduler, engine, auth)
 // the way the binary does, with service rows created as at startup, and
 // serves the API over a real HTTP server.
@@ -127,11 +131,15 @@ func newHarness(t *testing.T, check checks.CheckFunc, services ...string) *harne
 
 	registry := checks.NewRegistry()
 	registry.Register("tcp_connect", check)
-	sched := scheduler.New(registry, scorer.New(st, h.sess.ID, nil), h.configPath)
-	sched.SetMaxStagger(0)
+	sched := scheduler.New(registry, scorer.New(st, h.sess.ID, nil), h.configPath, testRound)
 	h.e = engine.New(st, h.sess, sched, h.configPath)
 	// Registered after the store's Close, so it runs first.
 	t.Cleanup(func() { h.e.Stop() })
+	// Registered after that, so it runs before both: as in app.Close, the
+	// round loop is gone before anything it records into is torn down.
+	ctx, cancel := context.WithCancel(context.Background())
+	done := sched.Run(ctx, 1)
+	t.Cleanup(func() { cancel(); <-done })
 
 	a := auth.New(testUsername, testHash)
 	srv := httptest.NewServer(newServer(h.e, st, h.sess.ID, a, h.configPath, log.New(h.logs, "", 0)))
@@ -823,7 +831,6 @@ func TestStartFailures_AreReportedInResponses(t *testing.T) {
 	h.writeConfig(configYAML("svc1") + `  - name: svc2
     host: 127.0.0.1
     check_type: tcp_connect
-    interval_seconds: 1
     points_per_failure: 10
     params: {prot: 9}
 `)
@@ -876,7 +883,6 @@ func TestStartFailures_AreReportedInResponses(t *testing.T) {
 		h.writeConfig(configYAML("svc1", "svc2") + `  - name: svc3
     host: 127.0.0.1
     check_type: http
-    interval_seconds: 1
     points_per_failure: 10
     params: {port: 80}
 `)

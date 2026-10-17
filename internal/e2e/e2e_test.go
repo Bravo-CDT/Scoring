@@ -2,9 +2,9 @@
 //
 // Every stack is built by app.New, the same function cmd/scoringengine calls,
 // so these tests exercise the real wiring rather than a copy of it. The only
-// substitutions are the ones app.Options exists for: a fake check registry
-// (always-failing tcp_connect) and no start-up stagger, so the tests are
-// deterministic and fast.
+// substitution is the one app.Options exists for: a fake check registry
+// (always-failing tcp_connect), so the tests are deterministic and touch no
+// real network unless they mean to.
 package e2e
 
 import (
@@ -12,10 +12,13 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"maps"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -24,6 +27,7 @@ import (
 
 	"github.com/Bravo-CDT/Scoring/internal/app"
 	"github.com/Bravo-CDT/Scoring/internal/checks"
+	"github.com/Bravo-CDT/Scoring/internal/store"
 )
 
 const (
@@ -38,24 +42,25 @@ const (
 	// sensitive detail text the public API must never reveal.
 	failDetail = "simulated outage: token=hunter2"
 
-	// waitTimeout bounds every poll. Checks run every second, so anything
+	// waitTimeout bounds every poll. Rounds run every second, so anything
 	// that should happen does so within a couple of seconds.
 	waitTimeout = 10 * time.Second
 	// quietPeriod is how long a negative assertion ("nothing changed") waits:
-	// comfortably more than two check intervals.
+	// comfortably more than two rounds.
 	quietPeriod = 2500 * time.Millisecond
 )
 
-// writeConfig writes a config with one 1-second tcp_connect service per
-// name. The admin hash comes from the environment, as in production.
+// writeConfig writes a config with 1-second rounds and one tcp_connect
+// service per name. The admin hash comes from the environment, as in
+// production.
 func writeConfig(t *testing.T, path string, services ...string) {
 	t.Helper()
 	var b strings.Builder
-	fmt.Fprintf(&b, "session_name: e2e-comp\nstarting_score: %d\n", startingScore)
+	fmt.Fprintf(&b, "session_name: e2e-comp\nstarting_score: %d\nround_interval_seconds: 1\n", startingScore)
 	fmt.Fprintf(&b, "admin:\n  username: %s\n  password_hash: ${%s}\nservices:\n", adminUser, hashEnvVar)
 	for _, name := range services {
 		fmt.Fprintf(&b, "  - name: %s\n    host: 127.0.0.1\n    check_type: tcp_connect\n"+
-			"    interval_seconds: 1\n    points_per_failure: %d\n    params: {port: 9}\n", name, pointsPerFailure)
+			"    points_per_failure: %d\n    params: {port: 9}\n", name, pointsPerFailure)
 	}
 	if err := os.WriteFile(path, []byte(b.String()), 0o600); err != nil {
 		t.Fatalf("writing config: %v", err)
@@ -87,12 +92,10 @@ func newStack(t *testing.T, dbPath, configPath string) *stack {
 
 func newStackWithRegistry(t *testing.T, dbPath, configPath string, registry *checks.Registry) *stack {
 	t.Helper()
-	noStagger := time.Duration(0)
 	a, err := app.New(app.Options{
 		ConfigPath: configPath,
 		DBPath:     dbPath,
 		Registry:   registry,
-		MaxStagger: &noStagger,
 	})
 	if err != nil {
 		t.Fatalf("app.New: %v", err)
@@ -103,7 +106,7 @@ func newStackWithRegistry(t *testing.T, dbPath, configPath string, registry *che
 }
 
 // close shuts the stack down the way main does: stop serving, then stop the
-// engine and close the store.
+// round loop and the engine and close the store.
 func (s *stack) close() {
 	if s.closed {
 		return
@@ -507,11 +510,11 @@ func TestEndToEnd_MassFailureIgnoresStoppedRoutines(t *testing.T) {
 	writePorts := func(ports map[string]int) {
 		t.Helper()
 		var b strings.Builder
-		fmt.Fprintf(&b, "session_name: e2e-comp\nstarting_score: %d\nmass_failure_fraction: 0.5\n", startingScore)
+		fmt.Fprintf(&b, "session_name: e2e-comp\nstarting_score: %d\nround_interval_seconds: 1\nmass_failure_fraction: 0.5\n", startingScore)
 		fmt.Fprintf(&b, "admin:\n  username: %s\n  password_hash: ${%s}\nservices:\n", adminUser, hashEnvVar)
 		for _, name := range []string{"down", "up1", "up2", "up3"} {
 			fmt.Fprintf(&b, "  - name: %s\n    host: 127.0.0.1\n    check_type: tcp_connect\n"+
-				"    interval_seconds: 1\n    points_per_failure: %d\n    params: {port: %d}\n", name, pointsPerFailure, ports[name])
+				"    points_per_failure: %d\n    params: {port: %d}\n", name, pointsPerFailure, ports[name])
 		}
 		if err := os.WriteFile(configPath, []byte(b.String()), 0o600); err != nil {
 			t.Fatalf("writing config: %v", err)
@@ -545,6 +548,147 @@ func TestEndToEnd_MassFailureIgnoresStoppedRoutines(t *testing.T) {
 	s.do(http.MethodGet, "/events?limit=500", "", nil, &events)
 	if hasEvent(events, "mass_failure_autopause") {
 		t.Fatalf("mass_failure_autopause logged although only 1 of 3 running services is failing: %v", events)
+	}
+}
+
+// storedResults returns a service's whole check history straight from the
+// store, newest first, with the round numbers the API does not show.
+func (s *stack) storedResults(name string) []store.CheckResult {
+	s.t.Helper()
+	svc, ok, err := s.app.Store.GetServiceByName(s.app.Session.ID, name)
+	if err != nil || !ok {
+		s.t.Fatalf("GetServiceByName(%q): found=%v err=%v", name, ok, err)
+	}
+	results, err := s.app.Store.ListCheckResults(svc.ID, 1000, 0)
+	if err != nil {
+		s.t.Fatalf("ListCheckResults(%q): %v", name, err)
+	}
+	return results
+}
+
+// latestRound is the round of a service's newest stored result, 0 if none.
+func (s *stack) latestRound(name string) int {
+	s.t.Helper()
+	if rs := s.storedResults(name); len(rs) > 0 {
+		return rs[0].Round
+	}
+	return 0
+}
+
+// listen opens a TCP listener on a free local port that accepts and drops
+// every connection, for a real tcp_connect check to pass against, and returns
+// its port.
+func listen(t *testing.T) int {
+	t.Helper()
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	t.Cleanup(func() { l.Close() })
+	go func() {
+		for {
+			c, err := l.Accept()
+			if err != nil {
+				return
+			}
+			c.Close()
+		}
+	}()
+	return l.Addr().(*net.TCPAddr).Port
+}
+
+// writeListenerConfig writes a config with 1-second rounds and one tcp_connect
+// service per entry of ports, each pointed at its local port.
+func writeListenerConfig(t *testing.T, path string, ports map[string]int) {
+	t.Helper()
+	var b strings.Builder
+	fmt.Fprintf(&b, "session_name: e2e-comp\nstarting_score: %d\nround_interval_seconds: 1\n", startingScore)
+	fmt.Fprintf(&b, "admin:\n  username: %s\n  password_hash: ${%s}\nservices:\n", adminUser, hashEnvVar)
+	for _, name := range slices.Sorted(maps.Keys(ports)) {
+		fmt.Fprintf(&b, "  - name: %s\n    host: 127.0.0.1\n    check_type: tcp_connect\n"+
+			"    points_per_failure: %d\n    params: {port: %d}\n", name, pointsPerFailure, ports[name])
+	}
+	if err := os.WriteFile(path, []byte(b.String()), 0o600); err != nil {
+		t.Fatalf("writing config: %v", err)
+	}
+}
+
+// TestEndToEnd_ServicesCheckInLockstep runs two real tcp_connect checks for
+// several rounds and checks that every round holds exactly one result for
+// each, stamped with the same instant: the services never drift apart.
+func TestEndToEnd_ServicesCheckInLockstep(t *testing.T) {
+	setAdminHash(t)
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.yaml")
+	writeListenerConfig(t, configPath, map[string]int{"web": listen(t), "ssh": listen(t)})
+
+	s := newStackWithRegistry(t, filepath.Join(dir, "scoring.db"), configPath, checks.NewDefaultRegistry())
+	s.admin(s.login(), "/engine/start")
+	waitFor(t, "3 rounds holding both services", func() bool {
+		return min(s.latestRound("web"), s.latestRound("ssh")) >= 3
+	})
+
+	byRound := func(name string) map[int]store.CheckResult {
+		out := make(map[int]store.CheckResult)
+		for _, r := range s.storedResults(name) {
+			if prev, dup := out[r.Round]; dup {
+				t.Fatalf("%s has two results for round %d: #%d and #%d", name, r.Round, prev.ID, r.ID)
+			}
+			if !r.Success {
+				t.Errorf("%s round %d failed (%q), want a pass against its listener", name, r.Round, r.Detail)
+			}
+			out[r.Round] = r
+		}
+		return out
+	}
+	web, ssh := byRound("web"), byRound("ssh")
+	// The newest round may still be being written as we read: compare every
+	// round up to the last one both services had finished.
+	last := min(slices.Max(slices.Collect(maps.Keys(web))), slices.Max(slices.Collect(maps.Keys(ssh))))
+	for round := 1; round <= last; round++ {
+		w, wok := web[round]
+		h, hok := ssh[round]
+		if !wok || !hok {
+			t.Errorf("round %d: web present %v, ssh present %v; want both", round, wok, hok)
+			continue
+		}
+		if !w.Timestamp.Equal(h.Timestamp) {
+			t.Errorf("round %d: web stamped %v, ssh %v; want one shared round start", round, w.Timestamp, h.Timestamp)
+		}
+	}
+}
+
+// TestEndToEnd_RoundNumberResumesAcrossARestart checks that a restarted
+// process carries on numbering rounds from where the last one stopped,
+// rather than starting again at 1.
+func TestEndToEnd_RoundNumberResumesAcrossARestart(t *testing.T) {
+	setAdminHash(t)
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "scoring.db")
+	configPath := filepath.Join(dir, "config.yaml")
+	writeConfig(t, configPath, "svc1")
+
+	s1 := newStack(t, dbPath, configPath)
+	s1.admin(s1.login(), "/engine/start")
+	waitFor(t, "2 rounds before the restart", func() bool { return s1.latestRound("svc1") >= 2 })
+	s1.close()
+
+	s2 := newStack(t, dbPath, configPath)
+	// Read once the first process is gone, so no round of its can still land.
+	before := s2.latestRound("svc1")
+	s2.admin(s2.login(), "/engine/start")
+	waitFor(t, "a round after the restart", func() bool { return s2.latestRound("svc1") > before })
+
+	// History is newest first; the earliest round past before is the
+	// restarted process's first.
+	first := 0
+	for _, r := range s2.storedResults("svc1") {
+		if r.Round > before {
+			first = r.Round
+		}
+	}
+	if first != before+1 {
+		t.Errorf("first round after the restart = %d, want %d (one past the last round before it)", first, before+1)
 	}
 }
 

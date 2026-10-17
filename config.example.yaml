@@ -21,6 +21,14 @@ session_name: "example-comp"
 # changing it later has no effect on an existing session.
 starting_score: 1000
 
+# Length of one scoring round, in seconds (a positive integer). Every running
+# service is checked once per round, all at the same instant, so every
+# service's results line up round by round. A check still running at the end
+# of the round is cancelled and counts as a failure. A service started (or
+# restarted) mid-round joins at the next round. Read at startup only (not on
+# /reload).
+round_interval_seconds: 30
+
 # Optional. If at least this fraction (0 < f <= 1) of active services are
 # failing at the same time (each one's latest check failed), all scoring is
 # paused automatically -- a safety net for an outage on the scoring side
@@ -40,10 +48,10 @@ admin:
   # Single-quote the hash when exporting it: it contains '$' characters.
   password_hash: ${ADMIN_PASSWORD_HASH}
 
-# Each service is checked every interval_seconds (seconds, a positive integer);
-# a check still running at the end of its interval is cancelled and counts as a
-# failure. Each failure costs points_per_failure. Service names are the keys
-# for scoring history: renaming one creates a new service.
+# Each service is checked once per round (see round_interval_seconds above);
+# there is no per-service interval. Each failure costs points_per_failure.
+# Service names are the keys for scoring history: renaming one creates a new
+# service.
 #
 # check_type is one of:
 #   tcp_connect  succeeds if a TCP connection to host:port opens.
@@ -63,7 +71,6 @@ services:
   - name: web
     host: 10.0.0.10
     check_type: http
-    interval_seconds: 30
     points_per_failure: 5
     params:
       port: 80
@@ -74,7 +81,6 @@ services:
   - name: ssh
     host: 10.0.0.11
     check_type: tcp_connect
-    interval_seconds: 60
     points_per_failure: 10
     params:
       port: 22
