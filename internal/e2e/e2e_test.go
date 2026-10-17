@@ -38,9 +38,8 @@ const (
 	startingScore    = 1000
 	pointsPerFailure = 10
 
-	// failDetail is what the fake check reports; it stands in for the
-	// sensitive detail text the public API must never reveal.
-	failDetail = "simulated outage: token=hunter2"
+	// failDetail is what the fake check reports when a service is down.
+	failDetail = "simulated outage: connection refused"
 
 	// waitTimeout bounds every poll. Rounds run every second, so anything
 	// that should happen does so within a couple of seconds.
@@ -351,15 +350,10 @@ func TestEndToEnd_LifecycleAndRestart(t *testing.T) {
 	beforeSvc3 := s1.status().BlueScore
 	waitFor(t, "svc3 failures to deduct points", func() bool { return s1.status().BlueScore < beforeSvc3 })
 
-	t.Log("detail text: hidden from the public, shown to the admin")
-	for _, r := range s1.results("svc1", "") {
-		if r.Detail != nil {
-			t.Fatalf("public result #%d exposes detail %q", r.ID, *r.Detail)
-		}
-	}
-	adminView := s1.results("svc1", token)
-	if len(adminView) == 0 || adminView[0].Detail == nil || *adminView[0].Detail != failDetail {
-		t.Fatalf("admin view of svc1 results lacks the check detail: %+v", adminView)
+	t.Log("detail text: check results show it to everyone, events only to the admin")
+	publicView := s1.results("svc1", "")
+	if len(publicView) == 0 || publicView[0].Detail == nil || *publicView[0].Detail != failDetail {
+		t.Fatalf("public view of svc1 results lacks the check detail: %+v", publicView)
 	}
 	var events []map[string]any
 	s1.do(http.MethodGet, "/events?limit=500", "", nil, &events)

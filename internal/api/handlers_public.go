@@ -57,11 +57,12 @@ func (s *server) handleEvents(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, out)
 }
 
-// checkResultResponse is one check attempt as the API shows it. Detail can
-// hold the very string or credential a check looks for, so it is only filled
-// in for admins.
+// checkResultResponse is one check attempt as the API shows it. Detail, the
+// check's explanation of its outcome, is public so the scoreboard can show
+// why a service is down; it is omitted only when empty.
 type checkResultResponse struct {
 	ID        int64     `json:"id"`
+	Round     int       `json:"round"`
 	Timestamp time.Time `json:"timestamp"`
 	Success   bool      `json:"success"`
 	LatencyMS int64     `json:"latency_ms"`
@@ -85,17 +86,15 @@ func (s *server) handleResults(w http.ResponseWriter, r *http.Request) {
 		s.publicError(w, r, err)
 		return
 	}
-	includeDetail := s.auth.IsAuthenticated(r)
 	out := make([]checkResultResponse, len(results))
 	for i, cr := range results {
 		out[i] = checkResultResponse{
 			ID:        cr.ID,
+			Round:     cr.Round,
 			Timestamp: cr.Timestamp.UTC(),
 			Success:   cr.Success,
 			LatencyMS: cr.LatencyMS,
-		}
-		if includeDetail {
-			out[i].Detail = cr.Detail
+			Detail:    cr.Detail,
 		}
 	}
 	writeJSON(w, http.StatusOK, out)

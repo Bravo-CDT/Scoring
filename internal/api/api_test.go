@@ -271,6 +271,7 @@ var adminRoutes = []string{
 	"/services/svc1/scoring/pause",
 	"/services/svc1/scoring/resume",
 	"/reload",
+	"/countdown",
 }
 
 func TestStatus_DocumentedFields(t *testing.T) {
@@ -539,44 +540,37 @@ func TestRestart(t *testing.T) {
 	})
 }
 
-func TestResults_DetailOnlyForAdmin(t *testing.T) {
+// Check detail is public: the scoreboard shows why a check failed. Event
+// detail stays admin-only (TestEvents_DetailStaysAdminOnlyForEveryType).
+func TestResults_DetailIsPublic(t *testing.T) {
 	h := newHarness(t, okCheck, "svc1")
 	svc := h.service("svc1")
 	ts := time.Date(2026, 10, 15, 12, 0, 0, 0, time.UTC)
 	if _, err := h.st.InsertCheckResult(store.CheckResult{
-		SessionID: h.sess.ID, ServiceID: svc.ID, Timestamp: ts,
-		Success: false, LatencyMS: 5, Detail: "super-secret-credential-leak",
+		SessionID: h.sess.ID, ServiceID: svc.ID, Round: 3, Timestamp: ts,
+		Success: false, LatencyMS: 5, Detail: "connection refused",
 	}); err != nil {
 		t.Fatalf("InsertCheckResult: %v", err)
 	}
-	token := h.login()
 
-	for _, tc := range []struct {
-		name, token string
-		wantDetail  bool
-	}{
-		{"public", "", false},
-		{"invalid token", "bogus", false},
-		{"admin", token, true},
+	for _, tc := range []struct{ name, token string }{
+		{"public", ""},
+		{"invalid token", "bogus"},
+		{"admin", h.login()},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			r := h.do(http.MethodGet, "/services/svc1/results", tc.token, "")
 			h.mustStatus(r, http.StatusOK, "GET results")
-			if leaked := bytes.Contains(r.body, []byte("super-secret-credential-leak")); leaked != tc.wantDetail {
-				t.Errorf("detail in body = %v, want %v: %s", leaked, tc.wantDetail, r.body)
-			}
 			rows := r.array(t)
 			if len(rows) != 1 {
 				t.Fatalf("rows = %v, want 1", rows)
 			}
-			want := []string{"id", "latency_ms", "success", "timestamp"}
-			if tc.wantDetail {
-				want = []string{"detail", "id", "latency_ms", "success", "timestamp"}
-			}
+			want := []string{"detail", "id", "latency_ms", "round", "success", "timestamp"}
 			if got := keys(rows[0]); !slices.Equal(got, want) {
 				t.Errorf("keys = %v, want %v", got, want)
 			}
-			if rows[0]["timestamp"] != "2026-10-15T12:00:00Z" || rows[0]["success"] != false ||
+			if rows[0]["detail"] != "connection refused" || rows[0]["round"] != 3.0 ||
+				rows[0]["timestamp"] != "2026-10-15T12:00:00Z" || rows[0]["success"] != false ||
 				rows[0]["latency_ms"] != 5.0 {
 				t.Errorf("row = %v", rows[0])
 			}
@@ -702,6 +696,57 @@ func TestEvents_ShapeAndDetail(t *testing.T) {
 	}
 }
 
+// Event detail is admin-only for every event type: there is no per-type
+// carve-out, not even for service up/down transitions.
+func TestEvents_DetailStaysAdminOnlyForEveryType(t *testing.T) {
+	h := newHarness(t, okCheck, "svc1")
+	types := []string{
+		"service_up", "service_down",
+		engine.EventEngineStarted, engine.EventEngineStopped,
+		engine.EventScoringPaused, engine.EventScoringResumed,
+		engine.EventRoutineStarted, engine.EventRoutineStopped,
+		engine.EventRoutineRestarted, engine.EventRoutineStartFailed,
+		engine.EventServiceScoringPaused, engine.EventServiceScoringResumed,
+		engine.EventServiceAdded, engine.EventServiceRemoved,
+		engine.EventConfigReloaded, engine.EventConfigSnapshotFailed,
+		engine.EventCountdownChanged,
+	}
+	for _, typ := range types {
+		if err := h.st.InsertEvent(store.Event{SessionID: h.sess.ID, Level: "info", Actor: "system",
+			Type: typ, Message: typ, Detail: "detail of " + typ}); err != nil {
+			t.Fatalf("InsertEvent: %v", err)
+		}
+	}
+	token := h.login()
+
+	for _, tc := range []struct {
+		name, token string
+		wantDetail  bool
+	}{
+		{"public", "", false},
+		{"invalid token", "bogus", false},
+		{"admin", token, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := h.do(http.MethodGet, "/events?limit=500", tc.token, "")
+			h.mustStatus(r, http.StatusOK, "GET /events")
+			events := r.array(t)
+			if len(events) != len(types) {
+				t.Fatalf("got %d events, want %d", len(events), len(types))
+			}
+			for _, ev := range events {
+				detail, has := ev["detail"]
+				if has != tc.wantDetail {
+					t.Errorf("event %v: detail present = %v, want %v", ev["type"], has, tc.wantDetail)
+				}
+				if has && detail != "detail of "+ev["type"].(string) {
+					t.Errorf("event %v: detail = %v", ev["type"], detail)
+				}
+			}
+		})
+	}
+}
+
 func TestEvents_Pagination(t *testing.T) {
 	h := newHarness(t, okCheck, "svc1")
 	base := time.Now().UTC().Add(-time.Hour)
@@ -760,6 +805,62 @@ func TestParseLimitAndBefore(t *testing.T) {
 		if got := parseBefore(r); got != want {
 			t.Errorf("parseBefore(%q) = %d, want %d", in, got, want)
 		}
+	}
+}
+
+func TestCountdown_SetsAndReturnsStatus(t *testing.T) {
+	h := newHarness(t, okCheck, "svc1")
+	token := h.login()
+	for _, tc := range []struct{ name, target, want string }{
+		{"UTC", "2026-10-17T17:00:00Z", "2026-10-17T17:00:00Z"},
+		{"offset is normalized to UTC", "2026-10-17T13:30:00-04:00", "2026-10-17T17:30:00Z"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := h.do(http.MethodPost, "/countdown", token, `{"target":"`+tc.target+`"}`)
+			h.mustStatus(r, http.StatusOK, "POST /countdown")
+			if got := r.object(t)["countdown_target"]; got != tc.want {
+				t.Errorf("response countdown_target = %v, want %s", got, tc.want)
+			}
+			if got := h.do(http.MethodGet, "/status", "", "").object(t)["countdown_target"]; got != tc.want {
+				t.Errorf("GET /status countdown_target = %v, want %s", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestCountdown_NullTargetClearsIt(t *testing.T) {
+	h := newHarness(t, okCheck, "svc1")
+	token := h.login()
+	h.mustStatus(h.do(http.MethodPost, "/countdown", token, `{"target":"2026-10-17T17:00:00Z"}`),
+		http.StatusOK, "set countdown")
+
+	r := h.do(http.MethodPost, "/countdown", token, `{"target":null}`)
+	h.mustStatus(r, http.StatusOK, "clear countdown")
+	if got, ok := r.object(t)["countdown_target"]; ok {
+		t.Errorf("response countdown_target = %v after clearing, want it absent", got)
+	}
+	if got, ok := h.do(http.MethodGet, "/status", "", "").object(t)["countdown_target"]; ok {
+		t.Errorf("GET /status countdown_target = %v after clearing, want it absent", got)
+	}
+}
+
+func TestCountdown_RejectsABadBody(t *testing.T) {
+	h := newHarness(t, okCheck, "svc1")
+	token := h.login()
+	for _, body := range []string{
+		`{"target":"not a time"}`,
+		`{"target":"2026-10-17 17:00:00"}`,
+		`{"target":1760720400}`,
+		`{"when":"2026-10-17T17:00:00Z"}`,
+		``,
+	} {
+		t.Run(body, func(t *testing.T) {
+			h.mustStatus(h.do(http.MethodPost, "/countdown", token, body), http.StatusBadRequest, "POST /countdown "+body)
+		})
+	}
+	// None of them changed anything.
+	if got, ok := h.do(http.MethodGet, "/status", "", "").object(t)["countdown_target"]; ok {
+		t.Errorf("countdown_target = %v after rejected requests, want it absent", got)
 	}
 }
 

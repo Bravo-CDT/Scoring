@@ -2,10 +2,10 @@
 // endpoints (status, events, check results) and admin control endpoints
 // behind a bearer token from POST /login.
 //
-// Every response, errors included, is JSON. Public endpoints never expose
-// check or event detail text unless the request carries a valid admin
-// token, and their internal errors are reported with a generic message (the
-// cause is logged instead); admin endpoints report the cause directly.
+// Every response, errors included, is JSON. Check result detail text is
+// public; event detail text is only exposed to a request carrying a valid
+// admin token. Public endpoints report internal errors with a generic message
+// (the cause is logged instead); admin endpoints report the cause directly.
 package api
 
 import (
@@ -72,6 +72,7 @@ func newServer(e *engine.Engine, st *store.Store, sessionID int64, a *auth.Auth,
 	admin("POST /engine/stop", s.engineAction(e.Stop))
 	admin("POST /scoring/pause", s.engineAction(e.PauseScoring))
 	admin("POST /scoring/resume", s.engineAction(e.ResumeScoring))
+	admin("POST /countdown", s.handleCountdown)
 	admin("POST /services/{name}/start", s.handleServiceStart)
 	admin("POST /services/{name}/stop", s.serviceAction(e.StopService))
 	admin("POST /services/{name}/restart", s.handleServiceRestart)

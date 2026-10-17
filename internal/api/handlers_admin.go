@@ -3,6 +3,7 @@ package api
 import (
 	"errors"
 	"net/http"
+	"time"
 
 	"github.com/Bravo-CDT/Scoring/internal/engine"
 )
@@ -158,6 +159,36 @@ func (s *server) statusAfterAction(w http.ResponseWriter, r *http.Request) (engi
 		return engine.Status{}, false
 	}
 	return status, true
+}
+
+type countdownRequest struct {
+	// Target is an RFC 3339 timestamp, or null to clear the countdown.
+	Target *string `json:"target"`
+}
+
+// handleCountdown serves POST /countdown with a {"target": "<RFC 3339>" | null}
+// body, setting or clearing the time the scoreboard's countdown runs to, and
+// answers with the current status.
+func (s *server) handleCountdown(w http.ResponseWriter, r *http.Request) {
+	var req countdownRequest
+	if err := decodeJSON(w, r, &req); err != nil {
+		writeBodyError(w, err)
+		return
+	}
+	var target *time.Time
+	if req.Target != nil {
+		t, err := time.Parse(time.RFC3339, *req.Target)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "target must be an RFC 3339 timestamp or null")
+			return
+		}
+		target = &t
+	}
+	if err := s.engine.SetCountdownTarget(target); err != nil {
+		s.adminError(w, r, err)
+		return
+	}
+	s.writeCurrentStatus(w, r)
 }
 
 type reloadResponse struct {
