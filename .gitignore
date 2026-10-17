@@ -2,4 +2,6 @@
 /.demo-targets/
 /config.yaml
 /scoring.db
+*.db-wal
+*.db-shm
 temp_*
