@@ -103,9 +103,10 @@ type Engine struct {
 	scheduler  *scheduler.Scheduler
 	configPath string
 
-	// mu serializes the control operations (everything but Status and the
-	// scoring pause/resume levers, which must stay usable while another
-	// operation is stuck; see setGlobalScoringPaused) and guards
+	// mu serializes the control operations (everything but Status, the
+	// scoring pause/resume levers and SetCountdownTarget, which must stay
+	// usable while another operation is stuck; see setGlobalScoringPaused
+	// and SetCountdownTarget) and guards
 	// desiredEnabled. Serializing is what keeps each operation's
 	// check-then-act sound: Stop cannot interleave with a StartService that
 	// has already seen the engine running and so leave a routine running
@@ -289,8 +290,9 @@ func (e *Engine) StartService(name string) error {
 // the round in progress, if any, is cancelled and its result discarded. It can
 // wait briefly for the scheduler to finish recording a round that already
 // ended (bounded by local database writes, never by a check), so once it
-// returns no further result for the service is recorded. The service stays stopped across engine stops and starts until
-// StartService or RestartService enables it again.
+// returns no further result for the service is recorded. The service stays
+// stopped across engine stops and starts until StartService or RestartService
+// enables it again.
 func (e *Engine) StopService(name string) error {
 	e.mu.Lock()
 	defer e.mu.Unlock()
