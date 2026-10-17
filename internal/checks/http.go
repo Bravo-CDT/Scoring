@@ -3,10 +3,12 @@ package checks
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
+	neturl "net/url"
 	"strconv"
 	"strings"
 )
@@ -45,10 +47,19 @@ func HTTP(ctx context.Context, host string, params map[string]any) Result {
 		return fail("%v", err)
 	}
 
-	url := "http://" + net.JoinHostPort(host, strconv.Itoa(p.port)) + p.path
+	base := "http://" + net.JoinHostPort(host, strconv.Itoa(p.port))
+	url := base + p.path
+	// Deliberately doesn't echo the path's query string (or fragment) in
+	// Detail: Detail may be shown publicly, and a query string is where an
+	// admin is most likely to have put a token or key. The request itself
+	// still uses the full url.
+	shown := url
+	if i := strings.IndexAny(p.path, "?#"); i >= 0 {
+		shown = base + p.path[:i]
+	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
-		return fail("building request for %s: %v", url, err)
+		return fail("building request for %s: %v", shown, withoutURL(err))
 	}
 
 	transport := &http.Transport{
@@ -67,7 +78,7 @@ func HTTP(ctx context.Context, host string, params map[string]any) Result {
 
 	resp, err := client.Do(req)
 	if err != nil {
-		return fail("requesting %s: %v", url, err)
+		return fail("requesting %s: %v", shown, withoutURL(err))
 	}
 	defer resp.Body.Close()
 
@@ -86,6 +97,17 @@ func HTTP(ctx context.Context, host string, params map[string]any) Result {
 		}
 	}
 	return Result{Success: true, Detail: "status " + strconv.Itoa(resp.StatusCode)}
+}
+
+// withoutURL strips the URL that net/http and net/url wrap their errors with
+// (a *url.Error prints its full URL, query string included), leaving just the
+// underlying cause.
+func withoutURL(err error) error {
+	var urlErr *neturl.Error
+	if errors.As(err, &urlErr) {
+		return urlErr.Err
+	}
+	return err
 }
 
 // httpParams is HTTP's parsed params, with defaults applied.

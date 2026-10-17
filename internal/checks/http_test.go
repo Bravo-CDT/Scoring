@@ -2,6 +2,7 @@ package checks
 
 import (
 	"context"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -104,6 +105,30 @@ func TestHTTP_ContentMismatch(t *testing.T) {
 	}
 	if strings.Contains(res.Detail, "SecretMarker") {
 		t.Errorf("Detail = %q leaks the expected content string", res.Detail)
+	}
+}
+
+func TestHTTP_FailureDetailOmitsQueryString(t *testing.T) {
+	// Point the check at a port nothing listens on, so it fails in the
+	// request itself, the error path that echoes the URL.
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	host, port := splitHostPortInt(t, ln.Addr().String())
+	ln.Close() // now nothing is listening on this port
+
+	res := HTTP(context.Background(), host, map[string]any{
+		"port": port, "path": "/health?api_key=hunter2",
+	})
+	if res.Success {
+		t.Fatal("expected failure against a closed port")
+	}
+	if strings.Contains(res.Detail, "hunter2") || strings.Contains(res.Detail, "api_key") || strings.Contains(res.Detail, "?") {
+		t.Errorf("Detail = %q leaks the path's query string", res.Detail)
+	}
+	if !strings.Contains(res.Detail, "/health") {
+		t.Errorf("Detail = %q, expected it to still name the path being checked", res.Detail)
 	}
 }
 
