@@ -749,6 +749,7 @@ func TestScoringPausesNotBlockedByStuckControlOp(t *testing.T) {
 		{"ResumeScoring", h.e.ResumeScoring},
 		{"PauseServiceScoring", func() error { return h.e.PauseServiceScoring("svc1") }},
 		{"ResumeServiceScoring", func() error { return h.e.ResumeServiceScoring("svc1") }},
+		{"SetCountdownTarget", func() error { return h.e.SetCountdownTarget(nil) }},
 	}
 	for _, op := range ops {
 		done := make(chan error, 1)
@@ -1038,7 +1039,7 @@ func TestStatus_JSONShape(t *testing.T) {
 	var got map[string]any
 	mustDo(t, "Unmarshal", json.Unmarshal(raw, &got))
 	for _, key := range []string{"session_name", "starting_score", "blue_score", "red_score",
-		"engine_state", "scoring_paused", "server_time", "services"} {
+		"engine_state", "scoring_paused", "server_time", "round", "next_round_at", "services"} {
 		if _, ok := got[key]; !ok {
 			t.Errorf("status JSON missing %q: %s", key, raw)
 		}
@@ -1052,6 +1053,78 @@ func TestStatus_JSONShape(t *testing.T) {
 	// No check has run yet, so there is no last check time to report.
 	if _, ok := svc["last_check_time"]; ok {
 		t.Errorf("last_check_time present before any check: %s", raw)
+	}
+	// No admin has set a countdown, so there is no target to report.
+	if _, ok := got["countdown_target"]; ok {
+		t.Errorf("countdown_target present before one was set: %s", raw)
+	}
+}
+
+// Status reports the scheduler's round status: nothing recorded yet before
+// the first round, then exactly what the round clock last recorded.
+func TestStatus_IncludesRoundAndNextRoundAt(t *testing.T) {
+	h := newHarness(t, okCheck, "svc1")
+	if s := h.status(t); s.Round != 0 || !s.NextRoundAt.IsZero() {
+		t.Errorf("before any round: Round = %d, NextRoundAt = %v; want 0 and the zero time", s.Round, s.NextRoundAt)
+	}
+
+	h.start(t)
+	waitFor(t, "a round to be recorded", func() bool { return h.status(t).Round >= 1 })
+	// Stopping the engine waits out any round being recorded and leaves no
+	// service enabled, so the round status holds still from here on.
+	mustDo(t, "Stop", h.e.Stop())
+	wantRound, wantNext := h.e.scheduler.RoundStatus()
+
+	s := h.status(t)
+	if s.Round != wantRound || !s.NextRoundAt.Equal(wantNext) {
+		t.Errorf("Round = %d, NextRoundAt = %v; want %d, %v", s.Round, s.NextRoundAt, wantRound, wantNext)
+	}
+	if wantNext.IsZero() {
+		t.Error("scheduler reports a zero NextRoundAt after a recorded round")
+	}
+}
+
+func TestSetCountdownTarget_PersistsAndAppearsInStatus(t *testing.T) {
+	h := newHarness(t, okCheck, "svc1")
+	if s := h.status(t); s.CountdownTarget != nil {
+		t.Fatalf("CountdownTarget = %v before any was set, want nil", s.CountdownTarget)
+	}
+
+	target := time.Date(2026, 10, 17, 17, 0, 0, 0, time.UTC)
+	mustDo(t, "SetCountdownTarget", h.e.SetCountdownTarget(&target))
+	if s := h.status(t); s.CountdownTarget == nil || !s.CountdownTarget.Equal(target) {
+		t.Fatalf("CountdownTarget = %v, want %v", s.CountdownTarget, target)
+	}
+	rs, err := h.st.GetRunState()
+	mustDo(t, "GetRunState", err)
+	if rs.CountdownTarget == nil || !rs.CountdownTarget.Equal(target) {
+		t.Errorf("persisted CountdownTarget = %v, want %v", rs.CountdownTarget, target)
+	}
+}
+
+func TestSetCountdownTarget_NilClearsIt(t *testing.T) {
+	h := newHarness(t, okCheck, "svc1")
+	target := time.Date(2026, 10, 17, 17, 0, 0, 0, time.UTC)
+	mustDo(t, "SetCountdownTarget", h.e.SetCountdownTarget(&target))
+	mustDo(t, "SetCountdownTarget(nil)", h.e.SetCountdownTarget(nil))
+	if s := h.status(t); s.CountdownTarget != nil {
+		t.Errorf("CountdownTarget = %v after clearing, want nil", s.CountdownTarget)
+	}
+}
+
+func TestSetCountdownTarget_LogsAnEvent(t *testing.T) {
+	h := newHarness(t, okCheck, "svc1")
+	// 12:00 in UTC-5, so the message must normalize it to 17:00Z.
+	target := time.Date(2026, 10, 17, 12, 0, 0, 0, time.FixedZone("UTC-5", -5*60*60))
+	mustDo(t, "SetCountdownTarget", h.e.SetCountdownTarget(&target))
+	ev := h.lastEvent(t, EventCountdownChanged)
+	if ev.Actor != "admin" || ev.ServiceID != nil || !strings.Contains(ev.Message, "2026-10-17T17:00:00Z") {
+		t.Errorf("event = %+v, want an admin engine event naming 2026-10-17T17:00:00Z", ev)
+	}
+
+	mustDo(t, "SetCountdownTarget(nil)", h.e.SetCountdownTarget(nil))
+	if ev := h.lastEvent(t, EventCountdownChanged); !strings.Contains(ev.Message, "cleared") {
+		t.Errorf("event after clearing = %+v, want a message saying it was cleared", ev)
 	}
 }
 

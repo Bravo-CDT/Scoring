@@ -45,6 +45,7 @@ const (
 	EventServiceRemoved        = "service_removed"
 	EventConfigReloaded        = "config_reloaded"
 	EventConfigSnapshotFailed  = "config_snapshot_failed"
+	EventCountdownChanged      = "countdown_changed"
 )
 
 // StartFailure reports one service whose routine failed to start, for the
@@ -111,12 +112,14 @@ type Engine struct {
 	// behind a stopped engine, and a routine is known to be running exactly
 	// when the scheduler says so.
 	//
-	// It is held across scheduler calls that block, such as StopService
-	// waiting for a routine to exit. That cannot deadlock: nothing a routine
-	// does (running its check, the scorer recording the result) ever calls
-	// back into the Engine, and the Engine never holds a database connection
-	// (an open transaction or unclosed rows) while it waits. Status does not
-	// take mu, so reads stay responsive while an operation waits.
+	// It is held across scheduler calls that can block, such as StopService
+	// waiting out a round the scheduler is recording. That wait is bounded by
+	// the scorer's local database writes, never by a check running, and it
+	// cannot deadlock: nothing the round loop does (running checks, the scorer
+	// recording the round) ever calls back into the Engine, and the Engine
+	// never holds a database connection (an open transaction or unclosed rows)
+	// while it waits. Status does not take mu, so reads stay responsive while
+	// an operation waits.
 	mu sync.Mutex
 	// desiredEnabled holds each service's admin-chosen routine state; a
 	// service absent from it is enabled.
@@ -223,15 +226,35 @@ func (e *Engine) ResumeScoring() error {
 
 // setGlobalScoringPaused deliberately does not take mu: pausing scoring is the
 // admin's emergency lever and must work even while another control operation
-// is stuck in mu (say, a StopService waiting on a check that ignores
-// cancellation). It needs no serialization — it is one write of a single
-// last-writer-wins flag, read fresh by the scorer on every result, and no
-// control operation checks it before acting — plus an event.
+// is held up in mu (say, a StopService waiting out a round the scheduler is
+// recording, which a slow database write can stretch). It needs no
+// serialization — it is one write of a single last-writer-wins flag, read
+// fresh by the scorer on every result, and no control operation checks it
+// before acting — plus an event.
 func (e *Engine) setGlobalScoringPaused(paused bool, eventType, message string) error {
 	if err := e.store.SetGlobalScoringPaused(paused); err != nil {
 		return fmt.Errorf("engine: %s: %w", message, err)
 	}
 	return e.logEngineEvent(ActorAdmin, eventType, message)
+}
+
+// SetCountdownTarget sets the time the scoreboard's countdown runs to, or
+// clears it when target is nil. The target is display-only: nothing in the
+// engine acts on it.
+//
+// It does not take mu, for the same reason as setGlobalScoringPaused: it is
+// one write of a single last-writer-wins value that no control operation
+// checks before acting, so it needs no serialization and should not wait
+// behind an operation held up in mu.
+func (e *Engine) SetCountdownTarget(target *time.Time) error {
+	if err := e.store.SetCountdownTarget(target); err != nil {
+		return fmt.Errorf("engine: setting countdown target: %w", err)
+	}
+	msg := "countdown target cleared"
+	if target != nil {
+		msg = "countdown target set to " + target.UTC().Format(time.RFC3339)
+	}
+	return e.logEngineEvent(ActorAdmin, EventCountdownChanged, msg)
 }
 
 // StartService enables the named service's routine and, if the engine is
@@ -262,8 +285,11 @@ func (e *Engine) StartService(name string) error {
 	return e.logServiceEvent(ActorAdmin, svc, EventRoutineStarted, svc.Name+" routine started")
 }
 
-// StopService disables the named service's routine and stops it, waiting for
-// it to exit. The service stays stopped across engine stops and starts until
+// StopService disables the named service's routine and stops it: its check in
+// the round in progress, if any, is cancelled and its result discarded. It can
+// wait briefly for the scheduler to finish recording a round that already
+// ended (bounded by local database writes, never by a check), so once it
+// returns no further result for the service is recorded. The service stays stopped across engine stops and starts until
 // StartService or RestartService enables it again.
 func (e *Engine) StopService(name string) error {
 	e.mu.Lock()
@@ -488,17 +514,25 @@ type ServiceStatus struct {
 	ConsecutiveFailures int        `json:"consecutive_failures"`
 }
 
-// Status is a point-in-time view of the session: score, run state, and every
-// active service, ordered by name.
+// Status is a point-in-time view of the session: score, run state, round
+// clock, and every active service, ordered by name.
 type Status struct {
-	SessionName   string          `json:"session_name"`
-	StartingScore int             `json:"starting_score"`
-	BlueScore     int             `json:"blue_score"`
-	RedScore      int             `json:"red_score"`
-	EngineState   string          `json:"engine_state"`
-	ScoringPaused bool            `json:"scoring_paused"`
-	ServerTime    time.Time       `json:"server_time"`
-	Services      []ServiceStatus `json:"services"`
+	SessionName   string    `json:"session_name"`
+	StartingScore int       `json:"starting_score"`
+	BlueScore     int       `json:"blue_score"`
+	RedScore      int       `json:"red_score"`
+	EngineState   string    `json:"engine_state"`
+	ScoringPaused bool      `json:"scoring_paused"`
+	ServerTime    time.Time `json:"server_time"`
+	// Round is the number of the last round recorded. NextRoundAt is when the
+	// next round is due; it is the zero time until this process records a
+	// round, and holds its last value while no service is being checked.
+	Round       int       `json:"round"`
+	NextRoundAt time.Time `json:"next_round_at"`
+	// CountdownTarget is the admin-set time the countdown runs to; omitted
+	// while unset.
+	CountdownTarget *time.Time      `json:"countdown_target,omitempty"`
+	Services        []ServiceStatus `json:"services"`
 }
 
 // Status reports the session's current state. It does not wait for control
@@ -518,15 +552,20 @@ func (e *Engine) Status() (Status, error) {
 		return Status{}, fmt.Errorf("engine: status: %w", err)
 	}
 
+	round, nextRoundAt := e.scheduler.RoundStatus()
+
 	out := Status{
-		SessionName:   e.session.Name,
-		StartingScore: e.session.StartingScore,
-		BlueScore:     blue,
-		RedScore:      red,
-		EngineState:   rs.EngineState,
-		ScoringPaused: rs.ScoringPaused,
-		ServerTime:    time.Now().UTC(),
-		Services:      make([]ServiceStatus, 0, len(svcs)),
+		SessionName:     e.session.Name,
+		StartingScore:   e.session.StartingScore,
+		BlueScore:       blue,
+		RedScore:        red,
+		EngineState:     rs.EngineState,
+		ScoringPaused:   rs.ScoringPaused,
+		ServerTime:      time.Now().UTC(),
+		Round:           round,
+		NextRoundAt:     nextRoundAt,
+		CountdownTarget: rs.CountdownTarget,
+		Services:        make([]ServiceStatus, 0, len(svcs)),
 	}
 	for _, svc := range svcs {
 		ss := ServiceStatus{

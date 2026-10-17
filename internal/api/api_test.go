@@ -279,8 +279,9 @@ func TestStatus_DocumentedFields(t *testing.T) {
 	h.mustStatus(r, http.StatusOK, "GET /status")
 
 	out := r.object(t)
-	wantTop := []string{"blue_score", "engine_state", "red_score", "scoring_paused",
-		"server_time", "services", "session_name", "starting_score"}
+	// countdown_target is omitted until an admin sets one.
+	wantTop := []string{"blue_score", "engine_state", "next_round_at", "red_score", "round",
+		"scoring_paused", "server_time", "services", "session_name", "starting_score"}
 	if got := keys(out); !slices.Equal(got, wantTop) {
 		t.Errorf("status keys = %v, want %v", got, wantTop)
 	}
