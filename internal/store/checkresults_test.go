@@ -107,6 +107,92 @@ func TestGetLatestCheckResult_NoneYet(t *testing.T) {
 	}
 }
 
+func TestInsertCheckResult_RoundRoundTrips(t *testing.T) {
+	st := openTemp(t)
+	sessionID, serviceID := setupServiceForResults(t, st, "apache-web")
+
+	id, err := st.InsertCheckResult(CheckResult{
+		SessionID: sessionID, ServiceID: serviceID, Round: 7, Success: true,
+	})
+	if err != nil {
+		t.Fatalf("InsertCheckResult: %v", err)
+	}
+
+	latest, err := st.GetLatestCheckResult(serviceID)
+	if err != nil {
+		t.Fatalf("GetLatestCheckResult: %v", err)
+	}
+	if latest == nil || latest.ID != id || latest.Round != 7 {
+		t.Errorf("GetLatestCheckResult = %+v, want row %d with Round 7", latest, id)
+	}
+
+	listed, err := st.ListCheckResults(serviceID, 10, 0)
+	if err != nil {
+		t.Fatalf("ListCheckResults: %v", err)
+	}
+	if len(listed) != 1 || listed[0].Round != 7 {
+		t.Errorf("ListCheckResults = %+v, want one row with Round 7", listed)
+	}
+}
+
+func TestNextRoundNumber_StartsAtOneWithNoHistory(t *testing.T) {
+	st := openTemp(t)
+	sessionID, _ := setupServiceForResults(t, st, "apache-web")
+
+	n, err := st.NextRoundNumber(sessionID)
+	if err != nil {
+		t.Fatalf("NextRoundNumber: %v", err)
+	}
+	if n != 1 {
+		t.Errorf("NextRoundNumber = %d for a session with no results, want 1", n)
+	}
+}
+
+func TestNextRoundNumber_ResumesAfterHighestStoredRound(t *testing.T) {
+	st := openTemp(t)
+	sessionID, serviceID := setupServiceForResults(t, st, "apache-web")
+
+	// Insert out of round order: the answer follows the highest round, not
+	// the most recently inserted one.
+	for _, round := range []int{3, 5, 4} {
+		if _, err := st.InsertCheckResult(CheckResult{
+			SessionID: sessionID, ServiceID: serviceID, Round: round, Success: true,
+		}); err != nil {
+			t.Fatalf("InsertCheckResult(round %d): %v", round, err)
+		}
+	}
+
+	n, err := st.NextRoundNumber(sessionID)
+	if err != nil {
+		t.Fatalf("NextRoundNumber: %v", err)
+	}
+	if n != 6 {
+		t.Errorf("NextRoundNumber = %d after rounds 3, 5 and 4, want 6", n)
+	}
+}
+
+func TestNextRoundNumber_IsScopedToOneSession(t *testing.T) {
+	st := openTemp(t)
+	sessionID, serviceID := setupServiceForResults(t, st, "apache-web")
+	if _, err := st.InsertCheckResult(CheckResult{
+		SessionID: sessionID, ServiceID: serviceID, Round: 9, Success: true,
+	}); err != nil {
+		t.Fatalf("InsertCheckResult: %v", err)
+	}
+
+	other, err := st.GetOrCreateSession("comp-2", 1000)
+	if err != nil {
+		t.Fatalf("GetOrCreateSession: %v", err)
+	}
+	n, err := st.NextRoundNumber(other.ID)
+	if err != nil {
+		t.Fatalf("NextRoundNumber: %v", err)
+	}
+	if n != 1 {
+		t.Errorf("NextRoundNumber = %d for a session whose only rounds belong to another, want 1", n)
+	}
+}
+
 func TestGetLatestCheckResult_IsNewestForThatServiceOnly(t *testing.T) {
 	st := openTemp(t)
 	sessionID, webID := setupServiceForResults(t, st, "apache-web")

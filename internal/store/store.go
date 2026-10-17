@@ -30,7 +30,10 @@ type Store struct {
 }
 
 // schema is applied on every Open. Every statement is IF NOT EXISTS, so
-// reopening an existing database is a no-op.
+// reopening an existing database is a no-op — which also means a column added
+// here never reaches a table an older engine already created. There are no
+// migrations (the data is disposable before competition day); Open instead
+// refuses such a file, see requireCurrentSchema.
 //
 // Conventions: all timestamps are Unix milliseconds (INTEGER), all booleans are
 // 0/1 (INTEGER), and money-like values (points, scores) are whole INTEGERs — no
@@ -68,6 +71,7 @@ CREATE TABLE IF NOT EXISTS check_results (
 	id          INTEGER PRIMARY KEY AUTOINCREMENT,
 	session_id  INTEGER NOT NULL REFERENCES sessions(id),
 	service_id  INTEGER NOT NULL REFERENCES services(id),
+	round       INTEGER NOT NULL DEFAULT 0,
 	timestamp   INTEGER NOT NULL,
 	success     INTEGER NOT NULL,
 	latency_ms  INTEGER NOT NULL,
@@ -118,10 +122,12 @@ CREATE INDEX IF NOT EXISTS idx_events_session_ts
 	ON events(session_id, service_id, timestamp DESC);
 
 -- Singleton row (id = 1) holding the engine's run state; see runstate.go.
+-- countdown_target is NULL when no countdown is set.
 CREATE TABLE IF NOT EXISTS engine_run_state (
-	id             INTEGER PRIMARY KEY CHECK (id = 1),
-	engine_state   TEXT NOT NULL,
-	scoring_paused INTEGER NOT NULL
+	id               INTEGER PRIMARY KEY CHECK (id = 1),
+	engine_state     TEXT NOT NULL,
+	scoring_paused   INTEGER NOT NULL,
+	countdown_target INTEGER
 );
 `
 
@@ -147,11 +153,39 @@ func Open(path string) (*Store, error) {
 		db.Close()
 		return nil, fmt.Errorf("store: applying schema to %s: %w", path, err)
 	}
+	if err := s.requireCurrentSchema(path); err != nil {
+		db.Close()
+		return nil, err
+	}
 	if err := s.resetRunStateToSafeDefault(); err != nil {
 		db.Close()
 		return nil, err
 	}
 	return s, nil
+}
+
+// requireCurrentSchema fails when the database at path was created before
+// scoring rounds: its check_results table has no round column, and every
+// check result insert would fail with a raw SQL error. Saying so up front,
+// with what to do about it, beats that. The round column stands for the whole
+// change: engine_run_state.countdown_target arrived with it.
+func (s *Store) requireCurrentSchema(path string) error {
+	hasRound, err := s.hasColumn("check_results", "round")
+	if err != nil {
+		return fmt.Errorf("store: checking schema of %s: %w", path, err)
+	}
+	if !hasRound {
+		return fmt.Errorf("store: %s predates scoring rounds (check_results has no round column) "+
+			"and cannot be migrated; start the engine with a fresh -db path", path)
+	}
+	return nil
+}
+
+// hasColumn reports whether table has a column named column.
+func (s *Store) hasColumn(table, column string) (bool, error) {
+	var count int
+	err := s.db.QueryRow(`SELECT COUNT(*) FROM pragma_table_info(?) WHERE name = ?`, table, column).Scan(&count)
+	return count > 0, err
 }
 
 // dsn builds the modernc.org/sqlite connection string for path. The pragmas

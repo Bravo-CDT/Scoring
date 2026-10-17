@@ -52,6 +52,10 @@ func sanitizeDetail(detail string) string {
 // CheckResult is one recorded check of one service: whether it answered, how
 // long it took, and what it said.
 //
+// Round is the scoring round the check belongs to. Every service is checked
+// once per round, so the round number is what lines results up across
+// services; NextRoundNumber finds where a restarted engine resumes.
+//
 // Timestamp is when the check ran, stored as Unix milliseconds and always read
 // back in UTC. It is the engine's clock, not the database's, so results from
 // concurrent checks can reach the table slightly out of timestamp order; the
@@ -64,6 +68,7 @@ type CheckResult struct {
 	ID        int64
 	SessionID int64
 	ServiceID int64
+	Round     int
 	Timestamp time.Time
 	Success   bool
 	LatencyMS int64
@@ -71,7 +76,7 @@ type CheckResult struct {
 }
 
 // checkResultColumns is the select list scanCheckResult expects, in order.
-const checkResultColumns = `id, session_id, service_id, timestamp, success, latency_ms, detail`
+const checkResultColumns = `id, session_id, service_id, round, timestamp, success, latency_ms, detail`
 
 // newestFirst orders the history queries. Timestamps are only millisecond
 // precise, so the id is needed as a tiebreaker: without it two checks that
@@ -127,7 +132,7 @@ const (
 func scanCheckResult(sc rowScanner) (CheckResult, error) {
 	var cr CheckResult
 	var timestampMillis int64
-	err := sc.Scan(&cr.ID, &cr.SessionID, &cr.ServiceID, &timestampMillis, &cr.Success, &cr.LatencyMS, &cr.Detail)
+	err := sc.Scan(&cr.ID, &cr.SessionID, &cr.ServiceID, &cr.Round, &timestampMillis, &cr.Success, &cr.LatencyMS, &cr.Detail)
 	if err != nil {
 		return CheckResult{}, err
 	}
@@ -143,9 +148,9 @@ func scanCheckResult(sc rowScanner) (CheckResult, error) {
 // end of every newest-first listing.
 func (s *Store) InsertCheckResult(cr CheckResult) (int64, error) {
 	res, err := s.db.Exec(
-		`INSERT INTO check_results (session_id, service_id, timestamp, success, latency_ms, detail)
-		 VALUES (?, ?, ?, ?, ?, ?)`,
-		cr.SessionID, cr.ServiceID, timestampMillis(cr.Timestamp), cr.Success, cr.LatencyMS,
+		`INSERT INTO check_results (session_id, service_id, round, timestamp, success, latency_ms, detail)
+		 VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		cr.SessionID, cr.ServiceID, cr.Round, timestampMillis(cr.Timestamp), cr.Success, cr.LatencyMS,
 		sanitizeDetail(cr.Detail),
 	)
 	if err != nil {
@@ -156,6 +161,21 @@ func (s *Store) InsertCheckResult(cr CheckResult) (int64, error) {
 		return 0, fmt.Errorf("store: reading new check result id for service %d: %w", cr.ServiceID, err)
 	}
 	return id, nil
+}
+
+// NextRoundNumber returns the round a session's next check results belong to:
+// one past the highest round it has recorded, or 1 if it has none. Taking the
+// highest rather than the latest-inserted round keeps the numbering strictly
+// increasing however the results of one round were interleaved.
+func (s *Store) NextRoundNumber(sessionID int64) (int, error) {
+	var highest int
+	err := s.db.QueryRow(
+		`SELECT COALESCE(MAX(round), 0) FROM check_results WHERE session_id = ?`, sessionID,
+	).Scan(&highest)
+	if err != nil {
+		return 0, fmt.Errorf("store: finding next round number for session %d: %w", sessionID, err)
+	}
+	return highest + 1, nil
 }
 
 // GetLatestCheckResult returns the service's most recent check result (the

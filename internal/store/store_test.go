@@ -1,8 +1,10 @@
 package store
 
 import (
+	"database/sql"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 )
@@ -39,10 +41,10 @@ func TestOpen_CreatesSchema(t *testing.T) {
 		"sessions":                 `SELECT COUNT(*) FROM sessions WHERE name = '' AND starting_score = 0 AND created_at = 0`,
 		"services":                 `SELECT COUNT(*) FROM services WHERE session_id = 0 AND name = '' AND active = 0 AND scoring_paused = 0 AND created_at = 0`,
 		"service_config_snapshots": `SELECT COUNT(*) FROM service_config_snapshots WHERE service_id = 0 AND applied_at = 0 AND host = '' AND check_type = '' AND interval_seconds = 0 AND points_per_failure = 0 AND params_json = ''`,
-		"check_results":            `SELECT COUNT(*) FROM check_results WHERE session_id = 0 AND service_id = 0 AND timestamp = 0 AND success = 0 AND latency_ms = 0 AND detail = ''`,
+		"check_results":            `SELECT COUNT(*) FROM check_results WHERE session_id = 0 AND service_id = 0 AND timestamp = 0 AND success = 0 AND latency_ms = 0 AND detail = '' AND round = 0`,
 		"ledger_entries":           `SELECT COUNT(*) FROM ledger_entries WHERE session_id = 0 AND timestamp = 0 AND source_type = '' AND source_ref = 0 AND from_side = '' AND to_side = '' AND nominal_points = 0 AND points = 0 AND voided = 0 AND voided_at IS NULL AND voided_reason IS NULL AND reason = ''`,
 		"events":                   `SELECT COUNT(*) FROM events WHERE session_id = 0 AND service_id IS NULL AND level = '' AND actor = '' AND type = '' AND message = '' AND detail = '' AND timestamp = 0`,
-		"engine_run_state":         `SELECT COUNT(*) FROM engine_run_state WHERE engine_state = '' AND scoring_paused = 0`,
+		"engine_run_state":         `SELECT COUNT(*) FROM engine_run_state WHERE engine_state = '' AND scoring_paused = 0 AND countdown_target IS NULL`,
 	}
 	for table, query := range queries {
 		var count int
@@ -78,6 +80,53 @@ func TestOpen_ForcesRunStateStoppedAndPaused(t *testing.T) {
 	}
 	if !rs.ScoringPaused {
 		t.Error("ScoringPaused = false after restart, want true")
+	}
+}
+
+func TestOpen_RefusesADatabaseFromBeforeRounds(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "scoring.db")
+
+	// Build the tables that changed in their pre-rounds shape, as a database
+	// file written by an older engine would have them. The schema's IF NOT
+	// EXISTS then leaves them alone, so without a guard the first insert of a
+	// check result would fail on the missing round column.
+	db, err := sql.Open("sqlite", dsn(path))
+	if err != nil {
+		t.Fatalf("sql.Open: %v", err)
+	}
+	_, err = db.Exec(`
+		CREATE TABLE check_results (
+			id          INTEGER PRIMARY KEY AUTOINCREMENT,
+			session_id  INTEGER NOT NULL REFERENCES sessions(id),
+			service_id  INTEGER NOT NULL REFERENCES services(id),
+			timestamp   INTEGER NOT NULL,
+			success     INTEGER NOT NULL,
+			latency_ms  INTEGER NOT NULL,
+			detail      TEXT NOT NULL
+		);
+		CREATE TABLE engine_run_state (
+			id             INTEGER PRIMARY KEY CHECK (id = 1),
+			engine_state   TEXT NOT NULL,
+			scoring_paused INTEGER NOT NULL
+		);`)
+	if err != nil {
+		t.Fatalf("creating pre-rounds tables: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("closing setup connection: %v", err)
+	}
+
+	st, err := Open(path)
+	if err == nil {
+		st.Close()
+		t.Fatal("Open succeeded on a pre-rounds database, want an error")
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, "round") || !strings.Contains(msg, path) {
+		t.Errorf("Open error = %q, want it to explain the missing round column and name %s", msg, path)
+	}
+	if strings.Contains(msg, "no such column") {
+		t.Errorf("Open error = %q, want an explanation rather than a raw SQL error", msg)
 	}
 }
 
