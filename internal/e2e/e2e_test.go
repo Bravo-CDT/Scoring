@@ -608,8 +608,9 @@ func writeListenerConfig(t *testing.T, path string, ports map[string]int) {
 }
 
 // TestEndToEnd_ServicesCheckInLockstep runs two real tcp_connect checks for
-// several rounds and checks that every round holds exactly one result for
-// each, stamped with the same instant: the services never drift apart.
+// several rounds and checks that, once both are checking, every round holds
+// exactly one result for each, stamped with the same instant: the services
+// never drift apart.
 func TestEndToEnd_ServicesCheckInLockstep(t *testing.T) {
 	setAdminHash(t)
 	dir := t.TempDir()
@@ -618,8 +619,10 @@ func TestEndToEnd_ServicesCheckInLockstep(t *testing.T) {
 
 	s := newStackWithRegistry(t, filepath.Join(dir, "scoring.db"), configPath, checks.NewDefaultRegistry())
 	s.admin(s.login(), "/engine/start")
-	waitFor(t, "3 rounds holding both services", func() bool {
-		return min(s.latestRound("web"), s.latestRound("ssh")) >= 3
+	// 4, not 3: round 1 may hold only one service (see below), and this
+	// still leaves at least two shared rounds to compare.
+	waitFor(t, "4 rounds holding both services", func() bool {
+		return min(s.latestRound("web"), s.latestRound("ssh")) >= 4
 	})
 
 	byRound := func(name string) map[int]store.CheckResult {
@@ -636,10 +639,16 @@ func TestEndToEnd_ServicesCheckInLockstep(t *testing.T) {
 		return out
 	}
 	web, ssh := byRound("web"), byRound("ssh")
-	// The newest round may still be being written as we read: compare every
-	// round up to the last one both services had finished.
+	// Start enables services one at a time, so a round can begin between
+	// the two and hold only one of them: compare from the first round both
+	// services are in. The newest round may still be being written as we
+	// read: compare up to the last one both services had finished.
+	first := max(slices.Min(slices.Collect(maps.Keys(web))), slices.Min(slices.Collect(maps.Keys(ssh))))
 	last := min(slices.Max(slices.Collect(maps.Keys(web))), slices.Max(slices.Collect(maps.Keys(ssh))))
-	for round := 1; round <= last; round++ {
+	if last-first < 1 {
+		t.Fatalf("only rounds %d..%d hold both services, want at least two to compare", first, last)
+	}
+	for round := first; round <= last; round++ {
 		w, wok := web[round]
 		h, hok := ssh[round]
 		if !wok || !hok {
