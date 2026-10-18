@@ -38,6 +38,11 @@ type Options struct {
 	// directory must already exist.
 	DBPath string
 
+	// WebDir is the built frontend (web/dist) to serve alongside the API:
+	// any GET or HEAD that matches no API route is answered from it (see
+	// NewStaticHandler). Empty means serve only the API.
+	WebDir string
+
 	// Registry supplies the check implementations. Nil means
 	// checks.NewDefaultRegistry().
 	Registry *checks.Registry
@@ -52,7 +57,8 @@ type App struct {
 	Store   *store.Store
 	Engine  *engine.Engine
 	Auth    *auth.Auth
-	// Handler serves the full HTTP API.
+	// Handler serves the full HTTP API, and the frontend if Options.WebDir
+	// is set.
 	Handler http.Handler
 
 	// stopRounds cancels the scheduler's round loop, and roundsDone is closed
@@ -151,6 +157,10 @@ func build(opts Options, cfg *config.Config, st *store.Store) (*App, error) {
 	}
 
 	au := auth.New(cfg.Admin.Username, cfg.Admin.PasswordHash)
+	var apiOpts []api.Option
+	if opts.WebDir != "" {
+		apiOpts = append(apiOpts, api.WithFallback(NewStaticHandler(opts.WebDir)))
+	}
 	// Started last, so no error path above leaves it running.
 	ctx, cancel := context.WithCancel(context.Background())
 	roundsDone := sched.Run(ctx, firstRound)
@@ -160,7 +170,7 @@ func build(opts Options, cfg *config.Config, st *store.Store) (*App, error) {
 		Store:      st,
 		Engine:     eng,
 		Auth:       au,
-		Handler:    api.NewServer(eng, st, sess.ID, au, opts.ConfigPath),
+		Handler:    api.NewServer(eng, st, sess.ID, au, opts.ConfigPath, apiOpts...),
 		stopRounds: cancel,
 		roundsDone: roundsDone,
 	}, nil

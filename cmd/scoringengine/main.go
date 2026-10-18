@@ -17,6 +17,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 	"time"
 
@@ -39,19 +40,20 @@ func main() {
 	configPath := flag.String("config", "config.yaml", "path to the config file")
 	dbPath := flag.String("db", "scoring.db", "path to the SQLite database file (its directory must exist)")
 	addr := flag.String("addr", ":8080", "HTTP listen address")
+	webDir := flag.String("web", "./web/dist", "directory of the built frontend to serve (see make build); empty serves only the API")
 	flag.Parse()
 
-	if err := run(*configPath, *dbPath, *addr); err != nil {
+	if err := run(*configPath, *dbPath, *addr, *webDir); err != nil {
 		log.Printf("scoringengine: %v", err)
 		os.Exit(1)
 	}
 }
 
-func run(configPath, dbPath, addr string) error {
+func run(configPath, dbPath, addr, webDir string) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	a, err := app.New(app.Options{ConfigPath: configPath, DBPath: dbPath})
+	a, err := app.New(app.Options{ConfigPath: configPath, DBPath: dbPath, WebDir: webDir})
 	if err != nil {
 		return err
 	}
@@ -72,6 +74,7 @@ func run(configPath, dbPath, addr string) error {
 	log.Printf("session %q (id %d): %d service(s) configured from %s, database %s",
 		a.Session.Name, a.Session.ID, len(a.Config.Services), configPath, dbPath)
 	log.Printf("listening on %s", ln.Addr())
+	logFrontend(webDir)
 	log.Printf("engine is STOPPED and scoring is PAUSED; to begin, an admin must " +
 		"POST /login, then POST /engine/start, then POST /scoring/resume")
 
@@ -96,6 +99,22 @@ func run(configPath, dbPath, addr string) error {
 	}
 	log.Printf("shutdown complete")
 	return nil
+}
+
+// logFrontend says where the frontend is served from, or warns that it will
+// not be. A missing build is not fatal: the API works without it, and the
+// scoreboard pages answer 404 until it is built.
+func logFrontend(webDir string) {
+	if webDir == "" {
+		log.Printf("no -web directory; serving the API only")
+		return
+	}
+	index := filepath.Join(webDir, "index.html")
+	if _, err := os.Stat(index); err != nil {
+		log.Printf("WARNING: frontend not found (%v); serving the API only until it is built (make build)", err)
+		return
+	}
+	log.Printf("serving the frontend from %s", webDir)
 }
 
 // shutdown stops accepting requests and drains in-flight ones, then stops the

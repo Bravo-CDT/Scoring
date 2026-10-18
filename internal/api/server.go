@@ -2,9 +2,10 @@
 // endpoints (status, events, check results) and admin control endpoints
 // behind a bearer token from POST /login.
 //
-// Every response, errors included, is JSON. Check result detail text is
-// public; event detail text is only exposed to a request carrying a valid
-// admin token. Public endpoints report internal errors with a generic message
+// Every response, errors included, is JSON, except those of the optional
+// fallback handler (WithFallback) that unmatched reads go to. Check result
+// detail text is public; event detail text is only exposed to a request
+// carrying a valid admin token. Public endpoints report internal errors with a generic message
 // (the cause is logged instead); admin endpoints report the cause directly.
 package api
 
@@ -40,17 +41,31 @@ type server struct {
 	configPath string
 	logger     *log.Logger
 	mux        *http.ServeMux
+	// fallback, if set, serves GET and HEAD requests that match no route.
+	fallback http.Handler
+}
+
+// Option configures NewServer.
+type Option func(*server)
+
+// WithFallback hands GET and HEAD requests whose path matches no API route
+// to h instead of answering them with the API's JSON 404, so the same server
+// can serve the frontend. Requests that match a route path but not its
+// method still get the API's JSON 405, and other methods on unknown paths
+// still get its JSON 404.
+func WithFallback(h http.Handler) Option {
+	return func(s *server) { s.fallback = h }
 }
 
 // NewServer builds the full route table: public read-only endpoints, admin
 // endpoints behind a.RequireAdmin, and /login. configPath is threaded through
 // to the /reload handler; empty means the path the engine was built with.
 // Internal errors are logged with the standard logger.
-func NewServer(e *engine.Engine, st *store.Store, sessionID int64, a *auth.Auth, configPath string) http.Handler {
-	return newServer(e, st, sessionID, a, configPath, log.Default())
+func NewServer(e *engine.Engine, st *store.Store, sessionID int64, a *auth.Auth, configPath string, opts ...Option) http.Handler {
+	return newServer(e, st, sessionID, a, configPath, log.Default(), opts...)
 }
 
-func newServer(e *engine.Engine, st *store.Store, sessionID int64, a *auth.Auth, configPath string, logger *log.Logger) *server {
+func newServer(e *engine.Engine, st *store.Store, sessionID int64, a *auth.Auth, configPath string, logger *log.Logger, opts ...Option) *server {
 	s := &server{
 		engine:     e,
 		store:      st,
@@ -59,6 +74,9 @@ func newServer(e *engine.Engine, st *store.Store, sessionID int64, a *auth.Auth,
 		configPath: configPath,
 		logger:     logger,
 		mux:        http.NewServeMux(),
+	}
+	for _, opt := range opts {
+		opt(s)
 	}
 
 	s.mux.HandleFunc("GET /status", s.handleStatus)
@@ -84,7 +102,8 @@ func newServer(e *engine.Engine, st *store.Store, sessionID int64, a *auth.Auth,
 }
 
 // ServeHTTP dispatches to the mux, rewriting the mux's own plain-text 404 and
-// 405 responses as JSON (keeping the 405's Allow header).
+// 405 responses as JSON (keeping the 405's Allow header). An unmatched GET or
+// HEAD goes to the fallback instead, if there is one.
 func (s *server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if _, pattern := s.mux.Handler(r); pattern != "" {
 		s.mux.ServeHTTP(w, r)
@@ -92,14 +111,19 @@ func (s *server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	rec := &headerRecorder{header: make(http.Header)}
 	s.mux.ServeHTTP(rec, r)
+	status := rec.status
+	if status == 0 {
+		status = http.StatusNotFound
+	}
+	if status == http.StatusNotFound && s.fallback != nil &&
+		(r.Method == http.MethodGet || r.Method == http.MethodHead) {
+		s.fallback.ServeHTTP(w, r)
+		return
+	}
 	for _, h := range []string{"Allow", "Location"} {
 		if v := rec.header.Get(h); v != "" {
 			w.Header().Set(h, v)
 		}
-	}
-	status := rec.status
-	if status == 0 {
-		status = http.StatusNotFound
 	}
 	writeError(w, status, http.StatusText(status))
 }

@@ -738,6 +738,66 @@ func TestEndToEnd_BootAndShutdownEvents(t *testing.T) {
 	}
 }
 
+// TestEndToEnd_ServesTheFrontendBesideTheAPI checks the WebDir wiring: the
+// built frontend answers its own files and every client-side route, while
+// the API's routes and JSON errors are untouched.
+func TestEndToEnd_ServesTheFrontendBesideTheAPI(t *testing.T) {
+	setAdminHash(t)
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.yaml")
+	writeConfig(t, configPath, "svc1")
+	webDir := filepath.Join(dir, "dist")
+	if err := os.MkdirAll(filepath.Join(webDir, "assets"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for name, contents := range map[string]string{"index.html": "<html>app</html>", "assets/app.js": "app()"} {
+		if err := os.WriteFile(filepath.Join(webDir, name), []byte(contents), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	a, err := app.New(app.Options{
+		ConfigPath: configPath,
+		DBPath:     filepath.Join(dir, "scoring.db"),
+		WebDir:     webDir,
+		Registry:   failingRegistry(),
+	})
+	if err != nil {
+		t.Fatalf("app.New: %v", err)
+	}
+	s := &stack{t: t, app: a, server: httptest.NewServer(a.Handler)}
+	t.Cleanup(s.close)
+
+	get := func(method, path string) (int, string, string) {
+		t.Helper()
+		req, err := http.NewRequest(method, s.server.URL+path, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("%s %s: %v", method, path, err)
+		}
+		defer resp.Body.Close()
+		var body bytes.Buffer
+		if _, err := body.ReadFrom(resp.Body); err != nil {
+			t.Fatal(err)
+		}
+		return resp.StatusCode, resp.Header.Get("Content-Type"), body.String()
+	}
+
+	for path, want := range map[string]string{"/": "<html>app</html>", "/admin": "<html>app</html>", "/assets/app.js": "app()"} {
+		if code, _, body := get(http.MethodGet, path); code != http.StatusOK || body != want {
+			t.Errorf("GET %s = %d %q, want 200 %q", path, code, body, want)
+		}
+	}
+	if st := s.status(); st.BlueScore != startingScore {
+		t.Errorf("GET /status blue_score = %d, want %d", st.BlueScore, startingScore)
+	}
+	if code, ct, _ := get(http.MethodPost, "/admin"); code != http.StatusNotFound || ct != "application/json" {
+		t.Errorf("POST /admin = %d %s, want the API's JSON 404", code, ct)
+	}
+}
+
 // TestExampleConfigStarts keeps the documented config.example.yaml in step
 // with the code: the real wiring must accept it as shipped.
 func TestExampleConfigStarts(t *testing.T) {

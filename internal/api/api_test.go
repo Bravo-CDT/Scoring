@@ -1057,3 +1057,63 @@ func TestInternalErrors_PublicGeneric_AdminVerbose(t *testing.T) {
 		t.Errorf("admin 500 error = %q, want the underlying cause", msg)
 	}
 }
+
+func TestFallback_ServesUnmatchedGETsOnly(t *testing.T) {
+	h := newHarness(t, okCheck, "svc1")
+	fallback := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		_, _ = io.WriteString(w, "frontend")
+	})
+	a := auth.New(testUsername, testHash)
+	srv := httptest.NewServer(NewServer(h.e, h.st, h.sess.ID, a, "", WithFallback(fallback)))
+	t.Cleanup(srv.Close)
+
+	tests := []struct {
+		method, path string
+		wantStatus   int
+		wantFallback bool
+	}{
+		{http.MethodGet, "/", http.StatusOK, true},
+		{http.MethodGet, "/admin", http.StatusOK, true},
+		{http.MethodGet, "/assets/index.js", http.StatusOK, true},
+		{http.MethodHead, "/admin", http.StatusOK, true},
+		// API routes keep answering as before, errors included.
+		{http.MethodGet, "/status", http.StatusOK, false},
+		{http.MethodPost, "/status", http.StatusMethodNotAllowed, false},
+		{http.MethodGet, "/engine/start", http.StatusMethodNotAllowed, false},
+		{http.MethodPost, "/engine/start", http.StatusUnauthorized, false},
+		// Only reads fall back: a write to an unknown path is still a JSON 404.
+		{http.MethodPost, "/admin", http.StatusNotFound, false},
+		{http.MethodDelete, "/no/such/route", http.StatusNotFound, false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.method+" "+tc.path, func(t *testing.T) {
+			req, err := http.NewRequest(tc.method, srv.URL+tc.path, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			resp, err := http.DefaultClient.Do(req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer resp.Body.Close()
+			body, err := io.ReadAll(resp.Body)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if resp.StatusCode != tc.wantStatus {
+				t.Errorf("status = %d, want %d (body %s)", resp.StatusCode, tc.wantStatus, body)
+			}
+			wantType := "application/json"
+			if tc.wantFallback {
+				wantType = "text/html"
+			}
+			if ct := resp.Header.Get("Content-Type"); ct != wantType {
+				t.Errorf("Content-Type = %q, want %q", ct, wantType)
+			}
+			if tc.wantFallback && tc.method == http.MethodGet && string(body) != "frontend" {
+				t.Errorf("body = %q, want the fallback's", body)
+			}
+		})
+	}
+}
