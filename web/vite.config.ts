@@ -1,3 +1,4 @@
+/// <reference types="vitest/config" />
 import react from '@vitejs/plugin-react';
 import { defineConfig } from 'vite';
 
@@ -17,5 +18,10 @@ export default defineConfig({
   plugins: [react()],
   server: {
     proxy: Object.fromEntries(apiPaths.map((path) => [path, apiURL])),
+  },
+  test: {
+    // Component tests render into a DOM; jsdom provides one.
+    environment: 'jsdom',
+    setupFiles: ['./src/test/setup.ts'],
   },
 });

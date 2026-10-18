@@ -78,3 +78,27 @@ async function getJSON<T>(path: string): Promise<T> {
 export function getStatus(): Promise<Status> {
   return getJSON<Status>('/status');
 }
+
+/** One check attempt in GET /services/{name}/results (api.checkResultResponse). */
+export interface CheckResult {
+  id: number;
+  round: number;
+  timestamp: string;
+  success: boolean;
+  latency_ms: number;
+  /**
+   * The check's explanation of its outcome; absent when empty. It is text
+   * from the checked service itself, untrusted: render it only as text.
+   */
+  detail?: string;
+}
+
+/**
+ * GET /services/{name}/results: the service's latest check results, newest
+ * first. `limit` is how many to return; the API defaults it (to 50) when
+ * omitted and caps it (at 500).
+ */
+export function getResults(name: string, limit?: number): Promise<CheckResult[]> {
+  const query = limit === undefined ? '' : `?${new URLSearchParams({ limit: String(limit) })}`;
+  return getJSON<CheckResult[]>(`/services/${encodeURIComponent(name)}/results${query}`);
+}

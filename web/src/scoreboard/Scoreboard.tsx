@@ -10,14 +10,18 @@ import {
   Stack,
   Text,
   Title,
+  UnstyledButton,
 } from '@mantine/core';
 import { useEffect, useState } from 'react';
 import type { ServiceStatus, Status } from '../api/client';
+import { ServiceHistory } from './ServiceHistory';
 import { useStatusPolling } from './useStatusPolling';
 
 /** The public scoreboard: scores, services' up/down state, and the countdown. */
 export function Scoreboard() {
   const { status, error, serverClockOffsetMs } = useStatusPolling();
+  // The service whose history is open, if any.
+  const [historyOf, setHistoryOf] = useState<string | null>(null);
 
   if (status === null) {
     return (
@@ -62,10 +66,14 @@ export function Scoreboard() {
           {status.services.length === 0 ? (
             <Text c="dimmed">No services configured.</Text>
           ) : (
-            status.services.map((service) => <ServiceRow key={service.name} service={service} />)
+            status.services.map((service) => (
+              <ServiceRow key={service.name} service={service} onSelect={() => setHistoryOf(service.name)} />
+            ))
           )}
         </Stack>
       </Stack>
+
+      {historyOf !== null && <ServiceHistory key={historyOf} name={historyOf} onClose={() => setHistoryOf(null)} />}
     </Container>
   );
 }
@@ -104,16 +112,19 @@ function TeamScore({ team, color, score }: { team: string; color: string; score:
   );
 }
 
-function ServiceRow({ service }: { service: ServiceStatus }) {
+/** A service's name and up/down state; clicking it opens its history. */
+function ServiceRow({ service, onSelect }: { service: ServiceStatus; onSelect: () => void }) {
   return (
-    <Paper withBorder px="md" py="sm" radius="md">
-      <Group justify="space-between">
-        <Text fw={500}>{service.name}</Text>
-        <Badge color={service.up ? 'green' : 'red'} variant="filled">
-          {service.up ? 'Up' : 'Down'}
-        </Badge>
-      </Group>
-    </Paper>
+    <UnstyledButton onClick={onSelect} aria-haspopup="dialog">
+      <Paper withBorder px="md" py="sm" radius="md">
+        <Group justify="space-between">
+          <Text fw={500}>{service.name}</Text>
+          <Badge color={service.up ? 'green' : 'red'} variant="filled">
+            {service.up ? 'Up' : 'Down'}
+          </Badge>
+        </Group>
+      </Paper>
+    </UnstyledButton>
   );
 }
 
