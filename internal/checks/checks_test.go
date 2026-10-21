@@ -59,7 +59,7 @@ func TestRegistry_RegisterReplaces(t *testing.T) {
 
 func TestNewDefaultRegistry_HasBuiltins(t *testing.T) {
 	r := NewDefaultRegistry()
-	for _, name := range []string{"tcp_connect", "http"} {
+	for _, name := range []string{"tcp_connect", "http", "smtp"} {
 		if _, ok := r.Get(name); !ok {
 			t.Errorf("expected default registry to include %q", name)
 		}
@@ -68,7 +68,7 @@ func TestNewDefaultRegistry_HasBuiltins(t *testing.T) {
 
 func TestBuiltinTypes(t *testing.T) {
 	got := BuiltinTypes()
-	if want := []string{"http", "tcp_connect"}; !slices.Equal(got, want) {
+	if want := []string{"http", "smtp", "tcp_connect"}; !slices.Equal(got, want) {
 		t.Errorf("BuiltinTypes() = %v, want %v", got, want)
 	}
 	// Every built-in type is in the default registry, so config validation and
@@ -111,6 +111,15 @@ func TestValidateParams(t *testing.T) {
 		{"http expect_status too high", "http", map[string]any{"port": 80, "expect_status": 600}, []string{`"expect_status"`, "599"}},
 		{"http expect_contains wrong type", "http", map[string]any{"port": 80, "expect_contains": 7}, []string{`"expect_contains"`, "string"}},
 
+		{"smtp valid", "smtp", map[string]any{"port": 587, "user": "mrkrabs", "password": "Patty321!"}, nil},
+		{"smtp valid with insecure_skip_verify", "smtp", map[string]any{"port": 587, "user": "mrkrabs", "password": "Patty321!", "insecure_skip_verify": true}, nil},
+		{"smtp missing port", "smtp", map[string]any{"user": "mrkrabs", "password": "Patty321!"}, []string{`"port"`, "missing"}},
+		{"smtp missing user", "smtp", map[string]any{"port": 587, "password": "Patty321!"}, []string{`"user"`, "missing"}},
+		{"smtp empty user", "smtp", map[string]any{"port": 587, "user": "", "password": "Patty321!"}, []string{`"user"`, "missing"}},
+		{"smtp missing password", "smtp", map[string]any{"port": 587, "user": "mrkrabs"}, []string{`"password"`, "missing"}},
+		{"smtp misspelled param", "smtp", map[string]any{"port": 587, "user": "mrkrabs", "password": "x", "pasword": "x"}, []string{`"pasword"`, "unknown"}},
+		{"smtp insecure_skip_verify wrong type", "smtp", map[string]any{"port": 587, "user": "mrkrabs", "password": "x", "insecure_skip_verify": "yes"}, []string{`"insecure_skip_verify"`, "boolean"}},
+
 		{"unknown check type", "ftp", map[string]any{"port": 21}, []string{`"ftp"`}},
 	}
 	for _, tt := range tests {
@@ -146,9 +155,9 @@ func TestValidateParams(t *testing.T) {
 }
 
 func TestBuiltins_RejectEmptyHost(t *testing.T) {
-	for name, fn := range map[string]CheckFunc{"tcp_connect": TCPConnect, "http": HTTP} {
+	for name, fn := range map[string]CheckFunc{"tcp_connect": TCPConnect, "http": HTTP, "smtp": SMTP} {
 		t.Run(name, func(t *testing.T) {
-			res := fn(context.Background(), "", map[string]any{"port": 80})
+			res := fn(context.Background(), "", map[string]any{"port": 80, "user": "u", "password": "p"})
 			if res.Success {
 				t.Fatal("expected failure for an empty host")
 			}

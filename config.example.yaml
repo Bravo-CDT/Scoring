@@ -63,6 +63,14 @@ admin:
 #                substring of the first 64 KiB of the body).
 #                Redirects are NOT followed: a 301/302 is judged as-is, so
 #                it passes only if expect_status names that code.
+#   smtp         connects, performs STARTTLS, then authenticates with AUTH
+#                PLAIN. Never sends a message -- a successful login is the
+#                pass condition, the same way pg_isready proves a database is
+#                healthy without running a query against it.
+#                params: port (required, integer 1-65535), user (required
+#                string), password (required string), insecure_skip_verify
+#                (optional bool, default false; skip TLS certificate
+#                verification during STARTTLS, for a self-signed cert).
 # Params are validated per check type at startup and on /reload: a missing
 # required param, a value of the wrong type or range, or a param the check
 # type does not know (e.g. a misspelled "expect_contain") is an error naming

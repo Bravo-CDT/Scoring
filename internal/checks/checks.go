@@ -40,6 +40,10 @@ var builtins = map[string]builtin{
 		check:    HTTP,
 		validate: func(p map[string]any) error { _, err := parseHTTPParams(p); return err },
 	},
+	"smtp": {
+		check:    SMTP,
+		validate: func(p map[string]any) error { _, err := parseSMTPParams(p); return err },
+	},
 }
 
 // BuiltinTypes returns the names of the check types the engine ships, sorted.
@@ -156,6 +160,25 @@ func stringParam(params map[string]any, key string) (s string, ok bool, err erro
 		return "", true, fmt.Errorf("param %q must be a string, got %T", key, v)
 	}
 	return s, true, nil
+}
+
+// boolParam reads an optional boolean param. ok reports whether the param
+// was present at all.
+func boolParam(params map[string]any, key string) (b bool, ok bool, err error) {
+	v, ok := params[key]
+	if !ok {
+		return false, false, nil
+	}
+	b, isBool := v.(bool)
+	if !isBool {
+		return false, true, fmt.Errorf("param %q must be a boolean, got %T", key, v)
+	}
+	return b, true, nil
+}
+
+// errMissingRequired builds the standard "missing required param" error.
+func errMissingRequired(key string) error {
+	return fmt.Errorf("missing required param %q", key)
 }
 
 // rejectUnknownParams fails if params has any key not in allowed.
