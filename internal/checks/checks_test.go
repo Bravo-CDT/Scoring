@@ -59,7 +59,7 @@ func TestRegistry_RegisterReplaces(t *testing.T) {
 
 func TestNewDefaultRegistry_HasBuiltins(t *testing.T) {
 	r := NewDefaultRegistry()
-	for _, name := range []string{"tcp_connect", "http", "http_exclusive", "postgres", "smtp"} {
+	for _, name := range []string{"tcp_connect", "http", "http_exclusive", "postgres", "smb", "smtp"} {
 		if _, ok := r.Get(name); !ok {
 			t.Errorf("expected default registry to include %q", name)
 		}
@@ -68,7 +68,7 @@ func TestNewDefaultRegistry_HasBuiltins(t *testing.T) {
 
 func TestBuiltinTypes(t *testing.T) {
 	got := BuiltinTypes()
-	if want := []string{"http", "http_exclusive", "postgres", "smtp", "tcp_connect"}; !slices.Equal(got, want) {
+	if want := []string{"http", "http_exclusive", "postgres", "smb", "smtp", "tcp_connect"}; !slices.Equal(got, want) {
 		t.Errorf("BuiltinTypes() = %v, want %v", got, want)
 	}
 	// Every built-in type is in the default registry, so config validation and
@@ -125,6 +125,14 @@ func TestValidateParams(t *testing.T) {
 		{"postgres missing dbname", "postgres", map[string]any{"port": 5432, "user": "mrkrabs", "password": "Patty321!"}, []string{`"dbname"`, "missing"}},
 		{"postgres misspelled param", "postgres", map[string]any{"port": 5432, "user": "mrkrabs", "password": "x", "dbname": "x", "dbanme": "x"}, []string{`"dbanme"`, "unknown"}},
 
+		{"smb valid", "smb", map[string]any{"port": 445, "user": "mrkrabs", "password": "Patty321!", "share": "sambashare"}, nil},
+		{"smb valid with optional params", "smb", map[string]any{"port": 445, "user": "mrkrabs", "password": "Patty321!", "domain": "KRUSTYKRAB", "share": "sambashare", "expect_share": "sambashare", "expect_file": "secretformula.txt"}, nil},
+		{"smb missing port", "smb", map[string]any{"user": "mrkrabs", "password": "Patty321!", "share": "sambashare"}, []string{`"port"`, "missing"}},
+		{"smb missing user", "smb", map[string]any{"port": 445, "password": "Patty321!", "share": "sambashare"}, []string{`"user"`, "missing"}},
+		{"smb missing password", "smb", map[string]any{"port": 445, "user": "mrkrabs", "share": "sambashare"}, []string{`"password"`, "missing"}},
+		{"smb missing share", "smb", map[string]any{"port": 445, "user": "mrkrabs", "password": "Patty321!"}, []string{`"share"`, "missing"}},
+		{"smb misspelled param", "smb", map[string]any{"port": 445, "user": "mrkrabs", "password": "x", "share": "s", "shre": "s"}, []string{`"shre"`, "unknown"}},
+
 		{"smtp valid", "smtp", map[string]any{"port": 587, "user": "mrkrabs", "password": "Patty321!"}, nil},
 		{"smtp valid with insecure_skip_verify", "smtp", map[string]any{"port": 587, "user": "mrkrabs", "password": "Patty321!", "insecure_skip_verify": true}, nil},
 		{"smtp missing port", "smtp", map[string]any{"user": "mrkrabs", "password": "Patty321!"}, []string{`"port"`, "missing"}},
@@ -169,9 +177,9 @@ func TestValidateParams(t *testing.T) {
 }
 
 func TestBuiltins_RejectEmptyHost(t *testing.T) {
-	for name, fn := range map[string]CheckFunc{"tcp_connect": TCPConnect, "http": HTTP, "http_exclusive": HTTPExclusive, "postgres": Postgres, "smtp": SMTP} {
+	for name, fn := range map[string]CheckFunc{"tcp_connect": TCPConnect, "http": HTTP, "http_exclusive": HTTPExclusive, "postgres": Postgres, "smb": SMB, "smtp": SMTP} {
 		t.Run(name, func(t *testing.T) {
-			res := fn(context.Background(), "", map[string]any{"port": 80, "user": "u", "password": "p", "dbname": "d"})
+			res := fn(context.Background(), "", map[string]any{"port": 80, "user": "u", "password": "p", "dbname": "d", "share": "s"})
 			if res.Success {
 				t.Fatal("expected failure for an empty host")
 			}

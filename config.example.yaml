@@ -84,6 +84,16 @@ admin:
 #                params: port (required, integer 1-65535), user (required
 #                string), password (required string), dbname (required
 #                string).
+#   smb          logs into an SMB/CIFS server via NTLM, optionally checks a
+#                share is listed, then mounts a share and lists its root,
+#                optionally checking a specific file is present.
+#                params: port (required, integer 1-65535, 445 for SMB), user
+#                (required string), password (required string), domain
+#                (optional string, default "", NTLM domain/workgroup), share
+#                (required string, the share to mount and list),
+#                expect_share (optional string, must appear in the share
+#                listing), expect_file (optional string, must appear by
+#                exact name in the mounted share's root listing).
 #   smtp         connects, performs STARTTLS, then authenticates with AUTH
 #                PLAIN. Never sends a message -- a successful login is the
 #                pass condition, the same way pg_isready proves a database is
