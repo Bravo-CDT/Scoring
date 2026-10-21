@@ -49,14 +49,7 @@ func HTTP(ctx context.Context, host string, params map[string]any) Result {
 
 	base := "http://" + net.JoinHostPort(host, strconv.Itoa(p.port))
 	url := base + p.path
-	// Deliberately doesn't echo the path's query string (or fragment) in
-	// Detail: Detail may be shown publicly, and a query string is where an
-	// admin is most likely to have put a token or key. The request itself
-	// still uses the full url.
-	shown := url
-	if i := strings.IndexAny(p.path, "?#"); i >= 0 {
-		shown = base + p.path[:i]
-	}
+	shown := base + redactedPath(p.path)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return fail("building request for %s: %v", shown, withoutURL(err))
@@ -97,6 +90,17 @@ func HTTP(ctx context.Context, host string, params map[string]any) Result {
 		}
 	}
 	return Result{Success: true, Detail: "status " + strconv.Itoa(resp.StatusCode)}
+}
+
+// redactedPath strips path's query string and fragment, for building a
+// Detail message: Detail may be shown publicly, and a query string is where
+// an admin is most likely to have put a token or key. The request itself
+// still uses the full path.
+func redactedPath(path string) string {
+	if i := strings.IndexAny(path, "?#"); i >= 0 {
+		return path[:i]
+	}
+	return path
 }
 
 // withoutURL strips the URL that net/http and net/url wrap their errors with

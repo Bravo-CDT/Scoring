@@ -59,7 +59,7 @@ func TestRegistry_RegisterReplaces(t *testing.T) {
 
 func TestNewDefaultRegistry_HasBuiltins(t *testing.T) {
 	r := NewDefaultRegistry()
-	for _, name := range []string{"tcp_connect", "http", "smtp"} {
+	for _, name := range []string{"tcp_connect", "http", "http_exclusive", "smtp"} {
 		if _, ok := r.Get(name); !ok {
 			t.Errorf("expected default registry to include %q", name)
 		}
@@ -68,7 +68,7 @@ func TestNewDefaultRegistry_HasBuiltins(t *testing.T) {
 
 func TestBuiltinTypes(t *testing.T) {
 	got := BuiltinTypes()
-	if want := []string{"http", "smtp", "tcp_connect"}; !slices.Equal(got, want) {
+	if want := []string{"http", "http_exclusive", "smtp", "tcp_connect"}; !slices.Equal(got, want) {
 		t.Errorf("BuiltinTypes() = %v, want %v", got, want)
 	}
 	// Every built-in type is in the default registry, so config validation and
@@ -110,6 +110,13 @@ func TestValidateParams(t *testing.T) {
 		{"http expect_status too low", "http", map[string]any{"port": 80, "expect_status": 99}, []string{`"expect_status"`, "599"}},
 		{"http expect_status too high", "http", map[string]any{"port": 80, "expect_status": 600}, []string{`"expect_status"`, "599"}},
 		{"http expect_contains wrong type", "http", map[string]any{"port": 80, "expect_contains": 7}, []string{`"expect_contains"`, "string"}},
+
+		{"http_exclusive valid", "http_exclusive", map[string]any{"port": 80, "expect_contains_ci": "wordpress", "closed_port": 8080}, nil},
+		{"http_exclusive missing port", "http_exclusive", map[string]any{"expect_contains_ci": "wordpress", "closed_port": 8080}, []string{`"port"`, "missing"}},
+		{"http_exclusive missing expect_contains_ci", "http_exclusive", map[string]any{"port": 80, "closed_port": 8080}, []string{`"expect_contains_ci"`, "missing"}},
+		{"http_exclusive missing closed_port", "http_exclusive", map[string]any{"port": 80, "expect_contains_ci": "wordpress"}, []string{`"closed_port"`, "missing"}},
+		{"http_exclusive closed_port out of range", "http_exclusive", map[string]any{"port": 80, "expect_contains_ci": "wordpress", "closed_port": 70000}, []string{`"closed_port"`, "65535"}},
+		{"http_exclusive misspelled param", "http_exclusive", map[string]any{"port": 80, "expect_contains_ci": "wordpress", "closed_port": 8080, "expect_contain_ci": "x"}, []string{`"expect_contain_ci"`, "unknown"}},
 
 		{"smtp valid", "smtp", map[string]any{"port": 587, "user": "mrkrabs", "password": "Patty321!"}, nil},
 		{"smtp valid with insecure_skip_verify", "smtp", map[string]any{"port": 587, "user": "mrkrabs", "password": "Patty321!", "insecure_skip_verify": true}, nil},
@@ -155,7 +162,7 @@ func TestValidateParams(t *testing.T) {
 }
 
 func TestBuiltins_RejectEmptyHost(t *testing.T) {
-	for name, fn := range map[string]CheckFunc{"tcp_connect": TCPConnect, "http": HTTP, "smtp": SMTP} {
+	for name, fn := range map[string]CheckFunc{"tcp_connect": TCPConnect, "http": HTTP, "http_exclusive": HTTPExclusive, "smtp": SMTP} {
 		t.Run(name, func(t *testing.T) {
 			res := fn(context.Background(), "", map[string]any{"port": 80, "user": "u", "password": "p"})
 			if res.Success {
