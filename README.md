@@ -25,9 +25,19 @@ cp config.demo.yaml config.yaml
 ADMIN_PASSWORD_HASH='<hash>' make run
 ```
 
-Once it's running: `POST /login`, then `POST /engine/start` and
-`POST /scoring/resume` as admin to begin checking and scoring. See
-`config.example.yaml` for the full config reference.
+To run it against the actual lab network:
+
+```sh
+cp config.lab.yaml config.yaml   # real hosts/services; no secrets in the file itself
+make hash PASSWORD=yourpassword
+ADMIN_PASSWORD_HASH='<hash>' PG_PASSWORD='...' SMB_PASSWORD='...' SMTP_PASSWORD='...' make run
+```
+
+Once it's running, open `http://<host>:8080/` for the public scoreboard.
+Log in at `http://<host>:8080/admin` and use its controls to start the
+engine and resume scoring (or `POST /login` then `POST /engine/start` and
+`POST /scoring/resume` directly). See `config.example.yaml` for the full
+config reference.
 
 To work on the frontend, run the engine as above in one terminal and
 `make dev` in another: it starts Vite's hot-reloading dev server (it prints
