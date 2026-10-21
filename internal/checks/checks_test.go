@@ -59,7 +59,7 @@ func TestRegistry_RegisterReplaces(t *testing.T) {
 
 func TestNewDefaultRegistry_HasBuiltins(t *testing.T) {
 	r := NewDefaultRegistry()
-	for _, name := range []string{"tcp_connect", "http", "http_exclusive", "smtp"} {
+	for _, name := range []string{"tcp_connect", "http", "http_exclusive", "postgres", "smtp"} {
 		if _, ok := r.Get(name); !ok {
 			t.Errorf("expected default registry to include %q", name)
 		}
@@ -68,7 +68,7 @@ func TestNewDefaultRegistry_HasBuiltins(t *testing.T) {
 
 func TestBuiltinTypes(t *testing.T) {
 	got := BuiltinTypes()
-	if want := []string{"http", "http_exclusive", "smtp", "tcp_connect"}; !slices.Equal(got, want) {
+	if want := []string{"http", "http_exclusive", "postgres", "smtp", "tcp_connect"}; !slices.Equal(got, want) {
 		t.Errorf("BuiltinTypes() = %v, want %v", got, want)
 	}
 	// Every built-in type is in the default registry, so config validation and
@@ -118,6 +118,13 @@ func TestValidateParams(t *testing.T) {
 		{"http_exclusive closed_port out of range", "http_exclusive", map[string]any{"port": 80, "expect_contains_ci": "wordpress", "closed_port": 70000}, []string{`"closed_port"`, "65535"}},
 		{"http_exclusive misspelled param", "http_exclusive", map[string]any{"port": 80, "expect_contains_ci": "wordpress", "closed_port": 8080, "expect_contain_ci": "x"}, []string{`"expect_contain_ci"`, "unknown"}},
 
+		{"postgres valid", "postgres", map[string]any{"port": 5432, "user": "mrkrabs", "password": "Patty321!", "dbname": "KrustySafe"}, nil},
+		{"postgres missing port", "postgres", map[string]any{"user": "mrkrabs", "password": "Patty321!", "dbname": "KrustySafe"}, []string{`"port"`, "missing"}},
+		{"postgres missing user", "postgres", map[string]any{"port": 5432, "password": "Patty321!", "dbname": "KrustySafe"}, []string{`"user"`, "missing"}},
+		{"postgres missing password", "postgres", map[string]any{"port": 5432, "user": "mrkrabs", "dbname": "KrustySafe"}, []string{`"password"`, "missing"}},
+		{"postgres missing dbname", "postgres", map[string]any{"port": 5432, "user": "mrkrabs", "password": "Patty321!"}, []string{`"dbname"`, "missing"}},
+		{"postgres misspelled param", "postgres", map[string]any{"port": 5432, "user": "mrkrabs", "password": "x", "dbname": "x", "dbanme": "x"}, []string{`"dbanme"`, "unknown"}},
+
 		{"smtp valid", "smtp", map[string]any{"port": 587, "user": "mrkrabs", "password": "Patty321!"}, nil},
 		{"smtp valid with insecure_skip_verify", "smtp", map[string]any{"port": 587, "user": "mrkrabs", "password": "Patty321!", "insecure_skip_verify": true}, nil},
 		{"smtp missing port", "smtp", map[string]any{"user": "mrkrabs", "password": "Patty321!"}, []string{`"port"`, "missing"}},
@@ -162,9 +169,9 @@ func TestValidateParams(t *testing.T) {
 }
 
 func TestBuiltins_RejectEmptyHost(t *testing.T) {
-	for name, fn := range map[string]CheckFunc{"tcp_connect": TCPConnect, "http": HTTP, "http_exclusive": HTTPExclusive, "smtp": SMTP} {
+	for name, fn := range map[string]CheckFunc{"tcp_connect": TCPConnect, "http": HTTP, "http_exclusive": HTTPExclusive, "postgres": Postgres, "smtp": SMTP} {
 		t.Run(name, func(t *testing.T) {
-			res := fn(context.Background(), "", map[string]any{"port": 80, "user": "u", "password": "p"})
+			res := fn(context.Background(), "", map[string]any{"port": 80, "user": "u", "password": "p", "dbname": "d"})
 			if res.Success {
 				t.Fatal("expected failure for an empty host")
 			}

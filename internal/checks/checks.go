@@ -44,6 +44,10 @@ var builtins = map[string]builtin{
 		check:    HTTPExclusive,
 		validate: func(p map[string]any) error { _, err := parseHTTPExclusiveParams(p); return err },
 	},
+	"postgres": {
+		check:    Postgres,
+		validate: func(p map[string]any) error { _, err := parsePostgresParams(p); return err },
+	},
 	"smtp": {
 		check:    SMTP,
 		validate: func(p map[string]any) error { _, err := parseSMTPParams(p); return err },

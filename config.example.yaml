@@ -76,6 +76,14 @@ admin:
 #                case-insensitive substring of the first 64 KiB of the
 #                body), closed_port (required, integer 1-65535; must refuse
 #                or time out a TCP connection).
+#   postgres     a full login (not just a port check) plus one trivial
+#                query, so a server that accepts TCP connections but can't
+#                authenticate or serve a query still counts as down. The
+#                connection is plain (sslmode disable), matching a manual
+#                psql command that passes no TLS flags.
+#                params: port (required, integer 1-65535), user (required
+#                string), password (required string), dbname (required
+#                string).
 #   smtp         connects, performs STARTTLS, then authenticates with AUTH
 #                PLAIN. Never sends a message -- a successful login is the
 #                pass condition, the same way pg_isready proves a database is
