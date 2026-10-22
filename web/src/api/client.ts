@@ -385,3 +385,20 @@ export interface BackupResponse extends Status {
 export function backupDatabase(send: AuthedFetch): Promise<BackupResponse> {
   return postJSON(send, '/backup');
 }
+
+/**
+ * The response of POST /db/reset-round: the current status, plus the
+ * backup's path when one was taken (absent otherwise).
+ */
+export interface ResetRoundResponse extends Status {
+  backup_path?: string;
+}
+
+/**
+ * POST /db/reset-round: resets this competition's score and check-result
+ * history, optionally backing up first. Rejects with an ApiError (status
+ * 409) unless the engine is fully stopped.
+ */
+export function resetRound(send: AuthedFetch, backup: boolean): Promise<ResetRoundResponse> {
+  return postJSON(send, '/db/reset-round', { backup });
+}

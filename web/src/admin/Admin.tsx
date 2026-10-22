@@ -5,6 +5,7 @@ import {
   Button,
   type ButtonProps,
   Center,
+  Checkbox,
   Container,
   Group,
   List,
@@ -33,6 +34,7 @@ import {
   pauseServiceScoring,
   type ReloadResponse,
   reload,
+  resetRound,
   restartService,
   resumeScoring,
   resumeServiceScoring,
@@ -501,7 +503,11 @@ function CountdownControl({ status, busy, perform }: { status: Status; busy: boo
   );
 }
 
-/** Database maintenance: an on-demand snapshot, requiring the engine stopped. */
+/**
+ * Database maintenance: an on-demand snapshot, and a double-confirmed reset
+ * of this competition's score and check history. Both require the engine
+ * stopped.
+ */
 function DatabaseControls({ status, busy, perform }: { status: Status; busy: boolean; perform: Perform }) {
   const running = status.engine_state === 'running';
   return (
@@ -510,6 +516,15 @@ function DatabaseControls({ status, busy, perform }: { status: Status; busy: boo
         <Button variant="default" disabled={busy || running} onClick={() => perform('Back up now', backupDatabase)}>
           Back up now
         </Button>
+        <DoubleConfirmButton
+          color="red"
+          disabled={busy || running}
+          confirmTitle="Reset for a new round?"
+          confirmMessage="This permanently erases every team's score and every service's check-result history for this competition. Admin history and service configuration are not affected. This cannot be undone except from a backup."
+          onConfirm={(backup) => perform('Reset for a new round', (send) => resetRound(send, backup))}
+        >
+          Reset for a new round
+        </DoubleConfirmButton>
         {running && (
           <Text c="dimmed" size="sm">
             Requires the engine to be stopped.
@@ -677,6 +692,77 @@ function ConfirmButton({
             >
               {confirmLabel}
             </Button>
+          </Group>
+        </Stack>
+      </Modal>
+    </>
+  );
+}
+
+interface DoubleConfirmButtonProps {
+  disabled?: boolean;
+  color?: string;
+  confirmTitle: string;
+  confirmMessage: string;
+  onConfirm: (backup: boolean) => void;
+  children: ReactNode;
+}
+
+/**
+ * A button for the most destructive actions: two sequential confirmations,
+ * each stating what is lost, with a "back up first" checkbox (checked by
+ * default) carried through to onConfirm. Cancel has the initial focus in
+ * both modals, so a stray Enter never confirms.
+ */
+function DoubleConfirmButton({
+  disabled,
+  color,
+  confirmTitle,
+  confirmMessage,
+  onConfirm,
+  children,
+}: DoubleConfirmButtonProps) {
+  const [step, setStep] = useState<0 | 1 | 2>(0);
+  const [backup, setBackup] = useState(true);
+  const close = () => setStep(0);
+
+  return (
+    <>
+      <Button color={color} disabled={disabled} onClick={() => setStep(1)} aria-haspopup="dialog">
+        {children}
+      </Button>
+      <Modal
+        opened={step !== 0}
+        onClose={close}
+        title={step === 2 ? 'Are you absolutely sure?' : confirmTitle}
+        closeButtonProps={{ 'aria-label': 'Close' }}
+      >
+        <Stack>
+          <Text size="sm" fw={step === 2 ? 700 : undefined} c={step === 2 ? 'red' : undefined}>
+            {confirmMessage}
+          </Text>
+          {step === 1 && (
+            <Checkbox label="Back up first" checked={backup} onChange={(e) => setBackup(e.currentTarget.checked)} />
+          )}
+          <Group justify="flex-end" gap="sm">
+            <Button variant="default" onClick={close} data-autofocus>
+              Cancel
+            </Button>
+            {step === 1 ? (
+              <Button color="red" onClick={() => setStep(2)}>
+                Yes, continue
+              </Button>
+            ) : (
+              <Button
+                color="red"
+                onClick={() => {
+                  close();
+                  onConfirm(backup);
+                }}
+              >
+                Yes, reset everything
+              </Button>
+            )}
           </Group>
         </Stack>
       </Modal>

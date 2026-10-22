@@ -269,6 +269,33 @@ describe('Admin', () => {
     expect(await screen.findByRole('button', { name: 'Back up now' })).toBeDisabled();
   });
 
+  it('resets the round after two confirmations, with backup checked by default', async () => {
+    localStorage.setItem(TOKEN_STORAGE_KEY, 'tok');
+    vi.spyOn(client, 'getStatus').mockResolvedValue({ ...status, engine_state: 'stopped' });
+    const fetchMock = stubApi({
+      'POST /db/reset-round': () => jsonResponse(200, { ...status, engine_state: 'stopped', backup_path: 'backups/x.db' }),
+    });
+    const user = userEvent.setup();
+    render(<Admin />);
+
+    await user.click(await screen.findByRole('button', { name: 'Reset for a new round' }));
+    await user.click(await screen.findByRole('button', { name: /yes/i }));
+    await user.click(await screen.findByRole('button', { name: /yes/i }));
+
+    const call = fetchMock.mock.calls.find(([, init]) => init?.method === 'POST');
+    expect(call).toBeDefined();
+    const [, init] = call!;
+    expect(JSON.parse(String(init?.body))).toEqual({ backup: true });
+    expect(await screen.findByText(/backups\/x\.db/)).toBeInTheDocument();
+  });
+
+  it('disables Reset for a new round while the engine is running', async () => {
+    localStorage.setItem(TOKEN_STORAGE_KEY, 'tok');
+    stubApi(); // status.engine_state defaults to 'running' in the shared fixture
+    render(<Admin />);
+    expect(await screen.findByRole('button', { name: 'Reset for a new round' })).toBeDisabled();
+  });
+
   it('sets the countdown as an absolute instant, and clears it with null', async () => {
     localStorage.setItem(TOKEN_STORAGE_KEY, 'tok');
     const bodies: unknown[] = [];
