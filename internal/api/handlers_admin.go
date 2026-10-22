@@ -278,3 +278,38 @@ func (s *server) handleBackup(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, backupResponse{Status: status, BackupPath: path})
 	}
 }
+
+type resetRoundRequest struct {
+	Backup bool `json:"backup"`
+}
+
+// resetRoundResponse is the status answer of POST /db/reset-round, plus the
+// backup's path when one was taken (omitted otherwise).
+type resetRoundResponse struct {
+	engine.Status
+	BackupPath string `json:"backup_path,omitempty"`
+}
+
+// handleResetRound serves POST /db/reset-round: a 409 while the engine is
+// running, otherwise resets this session's score and check-result history,
+// answering with the backup's path (if requested) alongside current status.
+func (s *server) handleResetRound(w http.ResponseWriter, r *http.Request) {
+	var req resetRoundRequest
+	if err := decodeJSON(w, r, &req); err != nil {
+		writeBodyError(w, err)
+		return
+	}
+
+	path, err := s.engine.ResetRound(req.Backup)
+	if err != nil {
+		if errors.Is(err, engine.ErrEngineRunning) {
+			s.writeConflict(w, err)
+			return
+		}
+		s.adminError(w, r, err)
+		return
+	}
+	if status, ok := s.statusAfterAction(w, r); ok {
+		writeJSON(w, http.StatusOK, resetRoundResponse{Status: status, BackupPath: path})
+	}
+}

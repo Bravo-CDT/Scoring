@@ -753,6 +753,46 @@ func TestBackupDatabase_SucceedsWhileStopped(t *testing.T) {
 	}
 }
 
+func TestResetRound_RejectedWhileEngineIsRunning(t *testing.T) {
+	h := newHarness(t, okCheck, "svc1")
+	h.start(t)
+	if _, err := h.e.ResetRound(true); !errors.Is(err, ErrEngineRunning) {
+		t.Fatalf("ResetRound while running: got %v, want ErrEngineRunning", err)
+	}
+}
+
+func TestResetRound_BacksUpFirstByDefaultAndThenResets(t *testing.T) {
+	h := newHarness(t, okCheck, "svc1")
+	h.start(t)
+	waitFor(t, "a check to be recorded", func() bool { return h.countResults(t, "svc1") > 0 })
+	mustDo(t, "Stop", h.e.Stop())
+
+	path, err := h.e.ResetRound(true)
+	if err != nil {
+		t.Fatalf("ResetRound: %v", err)
+	}
+	if path == "" {
+		t.Fatal("expected a non-empty backup path when backup=true")
+	}
+	if got := h.status(t).BlueScore; got != 1000 {
+		t.Fatalf("BlueScore after reset = %d, want 1000 (starting score)", got)
+	}
+	if got := h.countResults(t, "svc1"); got != 0 {
+		t.Fatalf("check results after reset = %d, want 0", got)
+	}
+}
+
+func TestResetRound_WithoutBackupSkipsIt(t *testing.T) {
+	h := newHarness(t, okCheck, "svc1")
+	path, err := h.e.ResetRound(false)
+	if err != nil {
+		t.Fatalf("ResetRound: %v", err)
+	}
+	if path != "" {
+		t.Fatalf("expected an empty backup path when backup=false, got %q", path)
+	}
+}
+
 // stuckSink is a ResultSink whose first RecordRound signals inRecord and then
 // blocks until release is closed, before passing the round on.
 type stuckSink struct {

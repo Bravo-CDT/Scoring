@@ -57,6 +57,7 @@ const (
 	EventCountdownChanged      = "countdown_changed"
 	EventScoreAdjusted         = "score_adjusted"
 	EventDatabaseBackedUp      = "database_backed_up"
+	EventRoundReset            = "round_reset"
 )
 
 // StartFailure reports one service whose routine failed to start, for the
@@ -556,6 +557,43 @@ func (e *Engine) backupLocked() (string, error) {
 		return "", fmt.Errorf("engine: backing up database: %w", err)
 	}
 	if err := e.logEngineEvent(ActorAdmin, EventDatabaseBackedUp, "database backed up to "+path); err != nil {
+		return path, err
+	}
+	return path, nil
+}
+
+// ResetRound deletes this session's score and check-result history,
+// requiring the engine be fully stopped. If backup is true, it snapshots the
+// database first; if that backup fails, nothing is reset and the error is
+// returned. Returns the backup's path, or "" if backup was false.
+//
+// Admin event history, the session row, service definitions, and config
+// snapshots are untouched, so the admin console and login keep working
+// immediately -- no restart needed. "Resetting credentials to their
+// defaults" needs no extra step here: every service routine already
+// re-reads config.yaml fresh the moment it is (re)started
+// (scheduler.start()), so the next "Start engine" after a reset naturally
+// uses whatever the file currently contains.
+func (e *Engine) ResetRound(backup bool) (string, error) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	var path string
+	if backup {
+		var err error
+		if path, err = e.backupLocked(); err != nil {
+			return "", err
+		}
+	} else if running, err := e.engineRunning(); err != nil {
+		return "", err
+	} else if running {
+		return "", ErrEngineRunning
+	}
+
+	if err := e.store.ResetRoundData(e.session.ID); err != nil {
+		return path, fmt.Errorf("engine: resetting round data: %w", err)
+	}
+	if err := e.logEngineEvent(ActorAdmin, EventRoundReset, "round reset: score and check history cleared"); err != nil {
 		return path, err
 	}
 	return path, nil
