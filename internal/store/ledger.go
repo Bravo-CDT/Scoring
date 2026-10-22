@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"math"
 	"time"
 
 	sqlitedrv "modernc.org/sqlite"
@@ -22,6 +23,12 @@ const (
 	SideBlue = "blue"
 	SideRed  = "red"
 )
+
+// SideManual is the pseudo-side a manual score adjustment moves points
+// to/from. GetScore only sums entries touching "blue" or "red", so an entry
+// with "manual" on the other end moves only the named side's balance -- an
+// independent correction, never a transfer between teams.
+const SideManual = "manual"
 
 // LedgerEntry is one point transfer between sides. The ledger is append-only
 // and is the only record of score: a side's balance is always derived by
@@ -169,7 +176,16 @@ func sessionStartingScore(q rowQuerier, sessionID int64) (int, error) {
 // side is blue, plus every non-voided transfer into it, minus every one out of
 // it. Each row's two terms are computed independently, so a row whose from and
 // to sides are the same nets to zero rather than counting one way.
+//
+// A side other than blue or red (SideManual, say) is not one of the
+// competition's two tracked balances: it is treated as an inexhaustible
+// external source/sink, so RecordLedgerEntry's floor-at-sender-balance never
+// floors a transfer out of it. Nothing it receives is ever read back either
+// way -- GetScore only ever sums blue and red.
 func sideBalance(q rowQuerier, sessionID int64, side string, startingScore int) (int, error) {
+	if side != SideBlue && side != SideRed {
+		return math.MaxInt, nil
+	}
 	var net int
 	err := q.QueryRow(
 		`SELECT COALESCE(SUM(
@@ -197,4 +213,37 @@ func sideBalance(q rowQuerier, sessionID int64, side string, startingScore int) 
 func isUniqueViolation(err error) bool {
 	var sqliteErr *sqlitedrv.Error
 	return errors.As(err, &sqliteErr) && sqliteErr.Code() == sqlite3.SQLITE_CONSTRAINT_UNIQUE
+}
+
+// nextManualAdjustmentRef atomically reserves and returns the next manual
+// adjustment reference, creating the counter row (starting at 1) on first
+// use.
+func (s *Store) nextManualAdjustmentRef() (int64, error) {
+	var ref int64
+	err := s.db.QueryRow(`
+		INSERT INTO manual_adjustment_seq (id, next) VALUES (1, 1)
+		ON CONFLICT(id) DO UPDATE SET next = next + 1
+		RETURNING next
+	`).Scan(&ref)
+	if err != nil {
+		return 0, fmt.Errorf("store: reserving the next manual adjustment reference: %w", err)
+	}
+	return ref, nil
+}
+
+// AdjustScore records a manual, independent correction of side's balance by
+// delta (nonzero; positive adds, negative deducts). It reuses
+// RecordLedgerEntry, which floors a deduction at side's current balance, so
+// a correction can never push a side negative; SideManual on the other end
+// of the transfer means nothing moves out of or into the other team.
+func (s *Store) AdjustScore(sessionID int64, side string, delta int, reason string) (LedgerEntry, error) {
+	ref, err := s.nextManualAdjustmentRef()
+	if err != nil {
+		return LedgerEntry{}, err
+	}
+	fromSide, toSide, nominalPoints := SideManual, side, delta
+	if delta < 0 {
+		fromSide, toSide, nominalPoints = side, SideManual, -delta
+	}
+	return s.RecordLedgerEntry(sessionID, "manual_adjustment", ref, fromSide, toSide, nominalPoints, reason)
 }

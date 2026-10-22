@@ -128,6 +128,13 @@ CREATE TABLE IF NOT EXISTS engine_run_state (
 	scoring_paused   INTEGER NOT NULL,
 	countdown_target INTEGER
 );
+
+-- Singleton counter backing AdjustScore's ledger source_ref, so every manual
+-- adjustment gets a distinct, monotonically increasing reference.
+CREATE TABLE IF NOT EXISTS manual_adjustment_seq (
+	id   INTEGER PRIMARY KEY CHECK (id = 1),
+	next INTEGER NOT NULL DEFAULT 1
+);
 `
 
 // Open opens (creating it if needed) the database at path, applies the schema,
