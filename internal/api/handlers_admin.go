@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/Bravo-CDT/Scoring/internal/engine"
+	"github.com/Bravo-CDT/Scoring/internal/store"
 )
 
 type loginRequest struct {
@@ -211,4 +212,45 @@ func (s *server) handleReload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, resp)
+}
+
+// writeConflict answers a precondition failure (scoring not paused, engine
+// not stopped) with 409 and the error's message.
+func (s *server) writeConflict(w http.ResponseWriter, err error) {
+	writeError(w, http.StatusConflict, err.Error())
+}
+
+type adjustScoreRequest struct {
+	Points int    `json:"points"`
+	Reason string `json:"reason"`
+}
+
+// handleAdjustScore serves POST /teams/{side}/adjust: a 400 for an unknown
+// side or zero points, a 409 if scoring is not paused, otherwise the
+// current status.
+func (s *server) handleAdjustScore(w http.ResponseWriter, r *http.Request) {
+	side := r.PathValue("side")
+	if side != store.SideBlue && side != store.SideRed {
+		writeError(w, http.StatusBadRequest, `side must be "blue" or "red"`)
+		return
+	}
+	var req adjustScoreRequest
+	if err := decodeJSON(w, r, &req); err != nil {
+		writeBodyError(w, err)
+		return
+	}
+	if req.Points == 0 {
+		writeError(w, http.StatusBadRequest, "points must not be zero")
+		return
+	}
+
+	if err := s.engine.AdjustScore(side, req.Points, req.Reason); err != nil {
+		if errors.Is(err, engine.ErrScoringNotPaused) {
+			s.writeConflict(w, err)
+			return
+		}
+		s.adminError(w, r, err)
+		return
+	}
+	s.writeCurrentStatus(w, r)
 }

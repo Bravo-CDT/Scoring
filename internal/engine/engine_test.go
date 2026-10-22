@@ -713,6 +713,27 @@ func TestPauseAndResumeScoring(t *testing.T) {
 	}
 }
 
+func TestAdjustScore_RejectedUnlessScoringIsPaused(t *testing.T) {
+	h := newHarness(t, okCheck, "svc1")
+	h.start(t)
+	mustDo(t, "ResumeScoring", h.e.ResumeScoring())
+	if err := h.e.AdjustScore(store.SideBlue, 10, "test"); !errors.Is(err, ErrScoringNotPaused) {
+		t.Fatalf("AdjustScore while scoring is not paused: got %v, want ErrScoringNotPaused", err)
+	}
+}
+
+func TestAdjustScore_AllowedWhileScoringPausedEvenIfEngineRunning(t *testing.T) {
+	h := newHarness(t, okCheck, "svc1")
+	h.start(t)
+	mustDo(t, "PauseScoring", h.e.PauseScoring())
+	if err := h.e.AdjustScore(store.SideBlue, 10, "test"); err != nil {
+		t.Fatalf("AdjustScore while paused: %v", err)
+	}
+	if got := h.status(t).BlueScore; got != 1010 {
+		t.Fatalf("BlueScore = %d, want 1010", got)
+	}
+}
+
 // stuckSink is a ResultSink whose first RecordRound signals inRecord and then
 // blocks until release is closed, before passing the round on.
 type stuckSink struct {

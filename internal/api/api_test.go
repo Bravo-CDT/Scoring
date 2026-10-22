@@ -915,6 +915,39 @@ func TestSaveConfig_RejectsInvalidYAMLAndWritesNothing(t *testing.T) {
 	}
 }
 
+func TestAdjustScore_RejectsAnUnknownSide(t *testing.T) {
+	h := newHarness(t, okCheck, "svc1")
+	token := h.login()
+	res := h.do(http.MethodPost, "/teams/manual/adjust", token, `{"points": 10, "reason": "x"}`)
+	h.mustStatus(res, http.StatusBadRequest, "adjust unknown side")
+}
+
+func TestAdjustScore_RejectsZeroPoints(t *testing.T) {
+	h := newHarness(t, okCheck, "svc1")
+	token := h.login()
+	h.mustStatus(h.do(http.MethodPost, "/scoring/resume", token, ""), http.StatusOK, "resume scoring")
+	res := h.do(http.MethodPost, "/teams/blue/adjust", token, `{"points": 0, "reason": "x"}`)
+	h.mustStatus(res, http.StatusBadRequest, "adjust zero points")
+}
+
+func TestAdjustScore_ConflictWhenScoringNotPaused(t *testing.T) {
+	h := newHarness(t, okCheck, "svc1")
+	token := h.login()
+	h.mustStatus(h.do(http.MethodPost, "/scoring/resume", token, ""), http.StatusOK, "resume scoring")
+	res := h.do(http.MethodPost, "/teams/blue/adjust", token, `{"points": 10, "reason": "x"}`)
+	h.mustStatus(res, http.StatusConflict, "adjust while not paused")
+}
+
+func TestAdjustScore_SucceedsWhilePaused(t *testing.T) {
+	h := newHarness(t, okCheck, "svc1")
+	token := h.login()
+	res := h.do(http.MethodPost, "/teams/blue/adjust", token, `{"points": 10, "reason": "x"}`)
+	h.mustStatus(res, http.StatusOK, "adjust while paused")
+	if got := res.object(t)["blue_score"]; got != 1010.0 {
+		t.Errorf("blue_score = %v, want 1010", got)
+	}
+}
+
 func TestReload(t *testing.T) {
 	h := newHarness(t, okCheck, "svc1")
 	token := h.login()

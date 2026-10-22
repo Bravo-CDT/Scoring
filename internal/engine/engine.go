@@ -30,6 +30,10 @@ import (
 // API) use errors.Is to answer such requests with 404 rather than 500.
 var ErrServiceNotFound = errors.New("engine: unknown service")
 
+// ErrScoringNotPaused is returned by AdjustScore when the global scoring
+// pause is not in effect.
+var ErrScoringNotPaused = errors.New("engine: scoring must be paused for a manual adjustment")
+
 // Event types the Engine writes.
 const (
 	EventEngineStarted         = "engine_started"
@@ -47,6 +51,7 @@ const (
 	EventConfigReloaded        = "config_reloaded"
 	EventConfigSnapshotFailed  = "config_snapshot_failed"
 	EventCountdownChanged      = "countdown_changed"
+	EventScoreAdjusted         = "score_adjusted"
 )
 
 // StartFailure reports one service whose routine failed to start, for the
@@ -245,6 +250,27 @@ func (e *Engine) setGlobalScoringPaused(paused bool, eventType, message string) 
 		return fmt.Errorf("engine: %s: %w", message, err)
 	}
 	return e.logEngineEvent(ActorAdmin, eventType, message)
+}
+
+// AdjustScore manually adjusts side's score by delta (nonzero), independent
+// of the other side. It requires the global scoring pause (status.scoring_paused
+// -- regardless of whether the engine itself is running or stopped), checked
+// fresh on every call, the same lever-style pattern as setGlobalScoringPaused:
+// it must stay usable even while a control operation is stuck in mu, so it
+// does not take mu.
+func (e *Engine) AdjustScore(side string, delta int, reason string) error {
+	rs, err := e.store.GetRunState()
+	if err != nil {
+		return fmt.Errorf("engine: adjusting score: %w", err)
+	}
+	if !rs.ScoringPaused {
+		return ErrScoringNotPaused
+	}
+	if _, err := e.store.AdjustScore(e.session.ID, side, delta, reason); err != nil {
+		return fmt.Errorf("engine: adjusting score: %w", err)
+	}
+	return e.logEngineEvent(ActorAdmin, EventScoreAdjusted,
+		fmt.Sprintf("%s adjusted by %+d: %s", side, delta, reason))
 }
 
 // SetCountdownTarget sets the time the scoreboard's countdown runs to, or
