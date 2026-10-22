@@ -508,6 +508,9 @@ type ServiceStatus struct {
 	Up bool `json:"up"`
 	// RoutineEnabled is whether the service's check routine is running.
 	RoutineEnabled bool `json:"routine_enabled"`
+	// Checking is whether the service's check is part of the round in
+	// progress right now, mid-flight.
+	Checking bool `json:"checking"`
 	// ScoringPaused is the service's own pause; the global one is in Status.
 	ScoringPaused bool `json:"scoring_paused"`
 	// LastCheckTime is when the latest check ran; omitted before any check.
@@ -573,6 +576,7 @@ func (e *Engine) Status() (Status, error) {
 		ss := ServiceStatus{
 			Name:           svc.Name,
 			RoutineEnabled: e.scheduler.IsRunning(svc.ID),
+			Checking:       e.scheduler.IsChecking(svc.ID),
 			ScoringPaused:  svc.ScoringPaused,
 		}
 		latest, err := e.store.GetLatestCheckResult(svc.ID)

@@ -644,6 +644,33 @@ func TestRoundStatus_PublishesProjectedNextRoundAtAsSoonAsTheRoundBegins(t *test
 	}
 }
 
+func TestIsChecking_TrueOnlyWhileTheRoundsCheckIsRunning(t *testing.T) {
+	checkStarted := make(chan struct{})
+	release := make(chan struct{})
+	slowCheck := func(context.Context, string, map[string]any) checks.Result {
+		close(checkStarted)
+		<-release
+		return checks.Result{Success: true}
+	}
+	sink := &fakeSink{}
+	s := newScheduler(t, registryWith(slowCheck), sink, newConfig(t), testRound)
+	run(t, s)
+	mustStart(t, s, 1, "svc1")
+
+	if s.IsChecking(1) {
+		t.Fatal("IsChecking is true before the service's first check has even started")
+	}
+	receive(t, "check to start", checkStarted)
+	if !s.IsChecking(1) {
+		t.Fatal("IsChecking is false while the check is still running")
+	}
+	close(release)
+	waitFor(t, "the round to be recorded", func() bool { return sink.count() == 1 })
+	if s.IsChecking(1) {
+		t.Fatal("IsChecking is still true after the round finished")
+	}
+}
+
 func TestHungCheckIsForceFailedAtDeadline(t *testing.T) {
 	sink := &fakeSink{}
 	s := newTestScheduler(t, registryWith(func(ctx context.Context, _ string, _ map[string]any) checks.Result {

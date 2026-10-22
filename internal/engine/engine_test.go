@@ -462,6 +462,28 @@ func TestStart_RecordsConfigSnapshotPerRoutineStart(t *testing.T) {
 	}
 }
 
+func TestStatus_CheckingReflectsAnInFlightCheck(t *testing.T) {
+	checkStarted := make(chan struct{})
+	release := make(chan struct{})
+	slowCheck := func(context.Context, string, map[string]any) checks.Result {
+		close(checkStarted)
+		<-release
+		return checks.Result{Success: true}
+	}
+	h := newHarness(t, slowCheck, "svc1")
+	h.start(t)
+
+	if h.status(t).Services[0].Checking {
+		t.Fatal("Checking is true before svc1's first check has even started")
+	}
+	<-checkStarted
+	if !h.status(t).Services[0].Checking {
+		t.Fatal("Checking is false while svc1's check is still running")
+	}
+	close(release)
+	waitFor(t, "svc1's check to finish", func() bool { return !h.status(t).Services[0].Checking })
+}
+
 func TestStop_HaltsEveryRoutine(t *testing.T) {
 	h := newHarness(t, okCheck, "svc1", "svc2")
 	h.start(t)

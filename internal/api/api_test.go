@@ -308,7 +308,7 @@ func TestStatus_DocumentedFields(t *testing.T) {
 	}
 	svc, _ := services[0].(map[string]any)
 	// last_check_time is omitted before any check has run.
-	wantSvc := []string{"consecutive_failures", "latency_ms", "name", "routine_enabled", "scoring_paused", "up"}
+	wantSvc := []string{"checking", "consecutive_failures", "latency_ms", "name", "routine_enabled", "scoring_paused", "up"}
 	if got := keys(svc); !slices.Equal(got, wantSvc) {
 		t.Errorf("service keys = %v, want %v", got, wantSvc)
 	}

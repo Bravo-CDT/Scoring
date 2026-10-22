@@ -313,6 +313,15 @@ func (s *Scheduler) IsRunning(serviceID int64) bool {
 	return ok
 }
 
+// IsChecking reports whether serviceID's check is part of the round in
+// progress right now (it is in inRound from beginRound until endRound).
+func (s *Scheduler) IsChecking(serviceID int64) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	_, ok := s.inRound[serviceID]
+	return ok
+}
+
 // RunningServiceIDs returns the IDs of all enabled services, in ascending
 // order.
 func (s *Scheduler) RunningServiceIDs() []int64 {
