@@ -10,6 +10,7 @@ import {
   List,
   Loader,
   Modal,
+  NumberInput,
   Paper,
   Stack,
   Table,
@@ -20,6 +21,7 @@ import {
 } from '@mantine/core';
 import { type FormEvent, type ReactNode, useEffect, useState } from 'react';
 import {
+  adjustScore,
   type AuthedFetch,
   describeError,
   getConfig,
@@ -227,6 +229,7 @@ function Console({ send, onLogout }: { send: AuthedFetch; onLogout: () => void }
               configStale={configStale}
               onConfigSaved={() => setConfigStale(true)}
             />
+            <ScoreAdjustment status={status} busy={busy} perform={perform} />
             <CountdownControl status={status} busy={busy} perform={perform} />
             <ServiceControls services={status.services} busy={busy} perform={perform} />
           </>
@@ -387,6 +390,53 @@ function ConfigEditor({ send, busy, onSaved }: { send: AuthedFetch; busy: boolea
         </Stack>
       </Modal>
     </>
+  );
+}
+
+/**
+ * A manual, independent score correction: one shared points/reason pair,
+ * applied to whichever team's button is clicked. Enabled only while scoring
+ * is paused -- enforced server-side too, not just here.
+ */
+function ScoreAdjustment({ status, busy, perform }: { status: Status; busy: boolean; perform: Perform }) {
+  const [points, setPoints] = useState<number | ''>('');
+  const [reason, setReason] = useState('');
+  const disabled = busy || !status.scoring_paused || points === '' || points === 0 || reason.trim() === '';
+
+  function submit(side: 'blue' | 'red') {
+    if (points === '') return;
+    void perform(`Adjust ${side}`, (send) => adjustScore(send, side, points, reason));
+  }
+
+  return (
+    <Section title="Scores">
+      {!status.scoring_paused && (
+        <Text c="dimmed" size="sm">
+          Manual adjustments are only allowed while scoring is paused.
+        </Text>
+      )}
+      <Group gap="sm" align="flex-end">
+        <NumberInput
+          label="Points"
+          description="Positive adds, negative deducts"
+          value={points}
+          onChange={(v) => setPoints(typeof v === 'number' ? v : '')}
+          disabled={!status.scoring_paused || busy}
+        />
+        <TextInput
+          label="Reason"
+          value={reason}
+          onChange={(e) => setReason(e.currentTarget.value)}
+          disabled={!status.scoring_paused || busy}
+        />
+        <Button disabled={disabled} onClick={() => submit('blue')}>
+          Adjust blue
+        </Button>
+        <Button disabled={disabled} onClick={() => submit('red')}>
+          Adjust red
+        </Button>
+      </Group>
+    </Section>
   );
 }
 

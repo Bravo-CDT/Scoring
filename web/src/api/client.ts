@@ -363,3 +363,12 @@ export interface SavedConfig {
 export function saveConfig(send: AuthedFetch, text: string, expectedHash: string): Promise<SavedConfig> {
   return postJSON(send, '/config', { text, expected_hash: expectedHash });
 }
+
+/**
+ * POST /teams/{side}/adjust: a manual, independent correction of side's
+ * score by points (nonzero; positive adds, negative deducts). Rejects with
+ * an ApiError (status 409) unless scoring is currently paused.
+ */
+export function adjustScore(send: AuthedFetch, side: 'blue' | 'red', points: number, reason: string): Promise<Status> {
+  return postJSON(send, `/teams/${side}/adjust`, { points, reason });
+}

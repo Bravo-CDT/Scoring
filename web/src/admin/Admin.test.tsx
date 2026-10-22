@@ -225,6 +225,28 @@ describe('Admin', () => {
     expect(screen.getByRole('button', { name: 'Save' })).toBeInTheDocument(); // editor still open
   });
 
+  it('submits a manual score adjustment while scoring is paused', async () => {
+    localStorage.setItem(TOKEN_STORAGE_KEY, 'tok');
+    vi.spyOn(client, 'getStatus').mockResolvedValue({ ...status, scoring_paused: true });
+    const fetchMock = stubApi({
+      'POST /teams/blue/adjust': () => jsonResponse(200, { ...status, scoring_paused: true, blue_score: 1010 }),
+    });
+    const user = userEvent.setup();
+    render(<Admin />);
+
+    await user.type(await screen.findByLabelText(/points/i), '10');
+    await user.type(screen.getByLabelText(/reason/i), 'corrected a mistake');
+    await user.click(screen.getByRole('button', { name: /adjust blue/i }));
+    expect(adminRequests(fetchMock)).toContain('POST /teams/blue/adjust');
+  });
+
+  it('disables the score adjustment controls while scoring is not paused', async () => {
+    localStorage.setItem(TOKEN_STORAGE_KEY, 'tok');
+    stubApi(); // status.scoring_paused defaults to false in the shared fixture
+    render(<Admin />);
+    expect(await screen.findByRole('button', { name: /adjust blue/i })).toBeDisabled();
+  });
+
   it('sets the countdown as an absolute instant, and clears it with null', async () => {
     localStorage.setItem(TOKEN_STORAGE_KEY, 'tok');
     const bodies: unknown[] = [];
