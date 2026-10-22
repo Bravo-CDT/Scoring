@@ -316,3 +316,50 @@ function isReloadResponse(body: unknown): body is ReloadResponse {
 export function setCountdown(send: AuthedFetch, target: string | null): Promise<Status> {
   return postJSON(send, '/countdown', { target });
 }
+
+async function getJSONAuthed<T>(send: AuthedFetch, path: string): Promise<T> {
+  const res = await send(path, { headers: { Accept: 'application/json' } });
+  if (!res.ok) {
+    throw await responseError('GET', path, res);
+  }
+  return (await res.json()) as T;
+}
+
+/** The response of GET /config. */
+export interface ConfigText {
+  text: string;
+  hash: string;
+}
+
+/** GET /config: the config file's current raw text and its hash. */
+export function getConfig(send: AuthedFetch): Promise<ConfigText> {
+  return getJSONAuthed(send, '/config');
+}
+
+/** The response of GET /config/status. */
+export interface ConfigStatus {
+  stale: boolean;
+}
+
+/**
+ * GET /config/status: whether the file on disk differs from what the
+ * engine last successfully loaded (i.e. a save is waiting on a reload).
+ */
+export function getConfigStatus(send: AuthedFetch): Promise<ConfigStatus> {
+  return getJSONAuthed(send, '/config/status');
+}
+
+/** The response of POST /config. */
+export interface SavedConfig {
+  hash: string;
+}
+
+/**
+ * POST /config: saves text as the new config file, rejecting with an
+ * ApiError (status 409) if expectedHash no longer matches the file on disk
+ * (someone else saved a newer version first), or 400 if text fails to
+ * validate. Does not reload; that is still the separate POST /reload.
+ */
+export function saveConfig(send: AuthedFetch, text: string, expectedHash: string): Promise<SavedConfig> {
+  return postJSON(send, '/config', { text, expected_hash: expectedHash });
+}

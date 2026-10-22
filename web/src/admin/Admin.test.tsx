@@ -44,6 +44,10 @@ function stubApi(routes: Record<string, Route> = {}) {
   const fetchMock = vi.fn<typeof fetch>(async (input, init) => {
     const key = `${init?.method ?? 'GET'} ${String(input)}`;
     if (key === 'GET /status') return jsonResponse(200, status);
+    // The config-staleness indicator polls this in the background on every
+    // mount; default it to "not stale" so tests that don't care about it
+    // don't need their own route, same as the status poll above.
+    if (key === 'GET /config/status') return jsonResponse(200, { stale: false });
     const route = routes[key];
     if (!route) throw new Error(`unexpected request: ${key}`);
     return route(init);
@@ -56,7 +60,7 @@ function stubApi(routes: Record<string, Route> = {}) {
 function adminRequests(fetchMock: ReturnType<typeof stubApi>): string[] {
   return fetchMock.mock.calls
     .map(([input, init]) => `${init?.method ?? 'GET'} ${String(input)}`)
-    .filter((key) => key !== 'GET /status');
+    .filter((key) => key !== 'GET /status' && key !== 'GET /config/status');
 }
 
 beforeEach(() => {
@@ -186,6 +190,39 @@ describe('Admin', () => {
     expect(screen.getByText('Added: ftp')).toBeInTheDocument();
     expect(screen.getByText('Removed: dns')).toBeInTheDocument();
     expect(screen.getByText('Failed to start ftp: bad port')).toBeInTheDocument();
+  });
+
+  it('opens the config editor, saves, and shows "New config detected" until reload', async () => {
+    localStorage.setItem(TOKEN_STORAGE_KEY, 'tok');
+    const fetchMock = stubApi({
+      'GET /config': () => jsonResponse(200, { text: 'session_name: "demo"', hash: 'h1' }),
+      'POST /config': () => jsonResponse(200, { hash: 'h2' }),
+    });
+    const user = userEvent.setup();
+    render(<Admin />);
+
+    await user.click(await screen.findByRole('button', { name: 'View config' }));
+    const textarea = await screen.findByRole('textbox', { name: /config/i });
+    await user.clear(textarea);
+    await user.type(textarea, 'session_name: "demo2"');
+    await user.click(screen.getByRole('button', { name: 'Save' }));
+
+    expect(adminRequests(fetchMock)).toContain('POST /config');
+    expect(await screen.findByText('New config detected')).toBeInTheDocument();
+  });
+
+  it('shows the save error inline and does not close the editor on a validation failure', async () => {
+    localStorage.setItem(TOKEN_STORAGE_KEY, 'tok');
+    stubApi({
+      'GET /config': () => jsonResponse(200, { text: 'session_name: "demo"', hash: 'h1' }),
+      'POST /config': () => jsonResponse(400, { error: 'parsing yaml: bad' }),
+    });
+    const user = userEvent.setup();
+    render(<Admin />);
+    await user.click(await screen.findByRole('button', { name: 'View config' }));
+    await user.click(await screen.findByRole('button', { name: 'Save' }));
+    expect(await screen.findByText(/bad/)).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Save' })).toBeInTheDocument(); // editor still open
   });
 
   it('sets the countdown as an absolute instant, and clears it with null', async () => {

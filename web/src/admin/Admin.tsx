@@ -14,13 +14,16 @@ import {
   Stack,
   Table,
   Text,
+  Textarea,
   TextInput,
   Title,
 } from '@mantine/core';
-import { type FormEvent, type ReactNode, useState } from 'react';
+import { type FormEvent, type ReactNode, useEffect, useState } from 'react';
 import {
   type AuthedFetch,
   describeError,
+  getConfig,
+  getConfigStatus,
   getStatus,
   pauseScoring,
   pauseServiceScoring,
@@ -29,6 +32,7 @@ import {
   restartService,
   resumeScoring,
   resumeServiceScoring,
+  saveConfig,
   type ServiceStatus,
   setCountdown,
   type StartFailure,
@@ -105,8 +109,32 @@ function Console({ send, onLogout }: { send: AuthedFetch; onLogout: () => void }
   const [outcome, setOutcome] = useState<Outcome | null>(null);
   // One action at a time: every control is disabled while one is in flight.
   const [busy, setBusy] = useState(false);
+  // Whether the config file has changed since the engine last reloaded it.
+  // Set optimistically the moment a save succeeds (see ConfigEditor), and
+  // refreshed from the server independently (e.g. someone edited the file
+  // by hand instead), so either source can raise it; only a successful
+  // reload lowers it.
+  const [configStale, setConfigStale] = useState(false);
 
   const status = newer(polled, fromAction);
+
+  useEffect(() => {
+    let cancelled = false;
+    async function pollConfigStatus() {
+      try {
+        const { stale } = await getConfigStatus(send);
+        if (!cancelled && stale) setConfigStale(true);
+      } catch {
+        // Best-effort indicator; a failed poll leaves the last known value.
+      }
+    }
+    void pollConfigStatus();
+    const interval = setInterval(pollConfigStatus, 5_000);
+    return () => {
+      cancelled = true;
+      clearInterval(interval);
+    };
+  }, [send]);
 
   async function perform(title: string, action: (send: AuthedFetch) => Promise<Status | StartResponse>) {
     setBusy(true);
@@ -130,6 +158,7 @@ function Console({ send, onLogout }: { send: AuthedFetch; onLogout: () => void }
     setBusy(true);
     try {
       setOutcome(reloadOutcome(await reload(send)));
+      setConfigStale(false);
     } catch (err) {
       setOutcome({ tone: 'error', title: 'Reload failed', details: [describeError(err)] });
       setBusy(false);
@@ -189,7 +218,15 @@ function Console({ send, onLogout }: { send: AuthedFetch; onLogout: () => void }
           </Center>
         ) : (
           <>
-            <EngineControls status={status} busy={busy} perform={perform} onReload={performReload} />
+            <EngineControls
+              status={status}
+              busy={busy}
+              perform={perform}
+              onReload={performReload}
+              send={send}
+              configStale={configStale}
+              onConfigSaved={() => setConfigStale(true)}
+            />
             <CountdownControl status={status} busy={busy} perform={perform} />
             <ServiceControls services={status.services} busy={busy} perform={perform} />
           </>
@@ -219,11 +256,17 @@ function EngineControls({
   busy,
   perform,
   onReload,
+  send,
+  configStale,
+  onConfigSaved,
 }: {
   status: Status;
   busy: boolean;
   perform: Perform;
   onReload: () => void;
+  send: AuthedFetch;
+  configStale: boolean;
+  onConfigSaved: () => void;
 }) {
   const running = status.engine_state === 'running';
   return (
@@ -263,11 +306,87 @@ function EngineControls({
             Pause scoring
           </Button>
         )}
+        <ConfigEditor send={send} busy={busy} onSaved={onConfigSaved} />
         <Button variant="default" disabled={busy} onClick={onReload}>
           Reload config
         </Button>
+        {configStale && <Badge color="yellow">New config detected</Badge>}
       </Group>
     </Section>
+  );
+}
+
+/**
+ * "View config": opens the raw config.yaml for editing and saves it back.
+ * Save carries the hash the editor was opened with, so a stale save (the
+ * file changed since) is rejected rather than silently overwritten; see
+ * POST /config. Saving does not reload -- that is still the separate
+ * "Reload config" button.
+ */
+function ConfigEditor({ send, busy, onSaved }: { send: AuthedFetch; busy: boolean; onSaved: () => void }) {
+  const [opened, setOpened] = useState(false);
+  const [text, setText] = useState('');
+  const [hash, setHash] = useState('');
+  const [error, setError] = useState<string | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [saving, setSaving] = useState(false);
+
+  async function open() {
+    setOpened(true);
+    setError(null);
+    setLoading(true);
+    try {
+      const cfg = await getConfig(send);
+      setText(cfg.text);
+      setHash(cfg.hash);
+    } catch (err) {
+      setError(describeError(err));
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function save() {
+    setSaving(true);
+    setError(null);
+    try {
+      await saveConfig(send, text, hash);
+      setOpened(false);
+      onSaved();
+    } catch (err) {
+      setError(describeError(err));
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <>
+      <Button variant="default" disabled={busy} onClick={open}>
+        View config
+      </Button>
+      <Modal opened={opened} onClose={() => setOpened(false)} title="Edit config.yaml" size="xl">
+        <Stack>
+          {error && <Alert color="red">{error}</Alert>}
+          <Textarea
+            label="Config (raw YAML)"
+            rows={20}
+            value={text}
+            onChange={(e) => setText(e.currentTarget.value)}
+            disabled={loading}
+            styles={{ input: { fontFamily: 'monospace' } }}
+          />
+          <Group justify="flex-end" gap="sm">
+            <Button variant="default" onClick={() => setOpened(false)} disabled={saving}>
+              Cancel
+            </Button>
+            <Button onClick={save} disabled={loading || saving}>
+              Save
+            </Button>
+          </Group>
+        </Stack>
+      </Modal>
+    </>
   );
 }
 
