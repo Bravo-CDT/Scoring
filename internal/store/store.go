@@ -20,13 +20,18 @@ import (
 	"database/sql"
 	"fmt"
 	"net/url"
+	"os"
+	"path/filepath"
+	"strings"
+	"time"
 
 	_ "modernc.org/sqlite"
 )
 
 // Store is a handle on the engine's database. It is safe for concurrent use.
 type Store struct {
-	db *sql.DB
+	db   *sql.DB
+	path string
 }
 
 // schema is applied on every Open. Every statement is IF NOT EXISTS, so
@@ -153,7 +158,7 @@ func Open(path string) (*Store, error) {
 	db.SetMaxOpenConns(1)
 	db.SetMaxIdleConns(1)
 
-	s := &Store{db: db}
+	s := &Store{db: db, path: path}
 	// sql.Open is lazy, so this is also where an unusable path surfaces.
 	if _, err := db.Exec(schema); err != nil {
 		db.Close()
@@ -223,4 +228,25 @@ func (s *Store) Close() error {
 		return fmt.Errorf("store: closing database: %w", err)
 	}
 	return nil
+}
+
+// Backup writes a complete, transactionally-consistent snapshot of the
+// database to a new file in a "backups" directory next to the database file
+// (created if missing), named "<db base name>-<UTC timestamp>.db". It uses
+// SQLite's VACUUM INTO, which produces a correct snapshot regardless of the
+// WAL's state -- unlike copying the .db/-wal/-shm files directly, which
+// could capture an inconsistent mid-checkpoint state. Returns the backup
+// file's full path.
+func (s *Store) Backup() (string, error) {
+	dir := filepath.Join(filepath.Dir(s.path), "backups")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return "", fmt.Errorf("store: creating backups directory %s: %w", dir, err)
+	}
+	base := strings.TrimSuffix(filepath.Base(s.path), filepath.Ext(s.path))
+	name := fmt.Sprintf("%s-%s.db", base, time.Now().UTC().Format("20060102T150405Z"))
+	dest := filepath.Join(dir, name)
+	if _, err := s.db.Exec(`VACUUM INTO ?`, dest); err != nil {
+		return "", fmt.Errorf("store: backing up to %s: %w", dest, err)
+	}
+	return dest, nil
 }

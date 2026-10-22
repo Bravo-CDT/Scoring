@@ -2,6 +2,7 @@ package store
 
 import (
 	"database/sql"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -261,5 +262,26 @@ func TestStore_SerializesConcurrentWrites(t *testing.T) {
 	}
 	if sessions != 1 {
 		t.Errorf("sessions row count = %d, want 1", sessions)
+	}
+}
+
+func TestBackup_CreatesAConsistentSnapshotInABackupsDirectory(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "scoring.db")
+	st := openAt(t, dbPath)
+
+	backupPath, err := st.Backup()
+	if err != nil {
+		t.Fatalf("Backup: %v", err)
+	}
+	if filepath.Dir(backupPath) != filepath.Join(dir, "backups") {
+		t.Fatalf("backup path = %q, want it inside %q", backupPath, filepath.Join(dir, "backups"))
+	}
+	if _, err := os.Stat(backupPath); err != nil {
+		t.Fatalf("backup file does not exist: %v", err)
+	}
+	restored := openAt(t, backupPath)
+	if _, _, err := restored.GetScore(1); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("querying the restored backup: %v, want sql.ErrNoRows (no session 1)", err)
 	}
 }
