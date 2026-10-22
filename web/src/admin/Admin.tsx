@@ -23,6 +23,8 @@ import { type FormEvent, type ReactNode, useEffect, useState } from 'react';
 import {
   adjustScore,
   type AuthedFetch,
+  backupDatabase,
+  type BackupResponse,
   describeError,
   getConfig,
   getConfigStatus,
@@ -138,16 +140,20 @@ function Console({ send, onLogout }: { send: AuthedFetch; onLogout: () => void }
     };
   }, [send]);
 
-  async function perform(title: string, action: (send: AuthedFetch) => Promise<Status | StartResponse>) {
+  async function perform(title: string, action: (send: AuthedFetch) => Promise<Status | StartResponse | BackupResponse>) {
     setBusy(true);
     try {
       const result = await action(send);
       setFromAction(result);
       const failed = 'failed' in result ? result.failed : [];
+      const details = failed.map(describeFailure);
+      if ('backup_path' in result && result.backup_path) {
+        details.push(`Backed up to ${result.backup_path}`);
+      }
       setOutcome(
         failed.length > 0
-          ? { tone: 'warning', title: `${title}: some routines failed to start`, details: failed.map(describeFailure) }
-          : { tone: 'success', title: `${title}: done`, details: [] },
+          ? { tone: 'warning', title: `${title}: some routines failed to start`, details }
+          : { tone: 'success', title: `${title}: done`, details },
       );
     } catch (err) {
       setOutcome({ tone: 'error', title: `${title} failed`, details: [describeError(err)] });
@@ -231,6 +237,7 @@ function Console({ send, onLogout }: { send: AuthedFetch; onLogout: () => void }
             />
             <ScoreAdjustment status={status} busy={busy} perform={perform} />
             <CountdownControl status={status} busy={busy} perform={perform} />
+            <DatabaseControls status={status} busy={busy} perform={perform} />
             <ServiceControls services={status.services} busy={busy} perform={perform} />
           </>
         )}
@@ -239,7 +246,7 @@ function Console({ send, onLogout }: { send: AuthedFetch; onLogout: () => void }
   );
 }
 
-type Perform = (title: string, action: (send: AuthedFetch) => Promise<Status | StartResponse>) => Promise<void>;
+type Perform = (title: string, action: (send: AuthedFetch) => Promise<Status | StartResponse | BackupResponse>) => Promise<void>;
 
 function Section({ title, children }: { title: string; children: ReactNode }) {
   return (
@@ -490,6 +497,25 @@ function CountdownControl({ status, busy, perform }: { status: Status; busy: boo
           </Button>
         </Group>
       </form>
+    </Section>
+  );
+}
+
+/** Database maintenance: an on-demand snapshot, requiring the engine stopped. */
+function DatabaseControls({ status, busy, perform }: { status: Status; busy: boolean; perform: Perform }) {
+  const running = status.engine_state === 'running';
+  return (
+    <Section title="Database">
+      <Group gap="sm">
+        <Button variant="default" disabled={busy || running} onClick={() => perform('Back up now', backupDatabase)}>
+          Back up now
+        </Button>
+        {running && (
+          <Text c="dimmed" size="sm">
+            Requires the engine to be stopped.
+          </Text>
+        )}
+      </Group>
     </Section>
   );
 }

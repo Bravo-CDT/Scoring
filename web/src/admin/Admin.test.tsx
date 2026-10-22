@@ -247,6 +247,28 @@ describe('Admin', () => {
     expect(await screen.findByRole('button', { name: /adjust blue/i })).toBeDisabled();
   });
 
+  it('backs up the database while the engine is stopped and shows where', async () => {
+    localStorage.setItem(TOKEN_STORAGE_KEY, 'tok');
+    vi.spyOn(client, 'getStatus').mockResolvedValue({ ...status, engine_state: 'stopped' });
+    const fetchMock = stubApi({
+      'POST /backup': () =>
+        jsonResponse(200, { ...status, engine_state: 'stopped', backup_path: 'backups/scoring-20261022T190000Z.db' }),
+    });
+    const user = userEvent.setup();
+    render(<Admin />);
+
+    await user.click(await screen.findByRole('button', { name: 'Back up now' }));
+    expect(adminRequests(fetchMock)).toContain('POST /backup');
+    expect(await screen.findByText(/scoring-20261022T190000Z\.db/)).toBeInTheDocument();
+  });
+
+  it('disables Back up now while the engine is running', async () => {
+    localStorage.setItem(TOKEN_STORAGE_KEY, 'tok');
+    stubApi(); // status.engine_state defaults to 'running' in the shared fixture
+    render(<Admin />);
+    expect(await screen.findByRole('button', { name: 'Back up now' })).toBeDisabled();
+  });
+
   it('sets the countdown as an absolute instant, and clears it with null', async () => {
     localStorage.setItem(TOKEN_STORAGE_KEY, 'tok');
     const bodies: unknown[] = [];

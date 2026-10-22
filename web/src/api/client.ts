@@ -372,3 +372,16 @@ export function saveConfig(send: AuthedFetch, text: string, expectedHash: string
 export function adjustScore(send: AuthedFetch, side: 'blue' | 'red', points: number, reason: string): Promise<Status> {
   return postJSON(send, `/teams/${side}/adjust`, { points, reason });
 }
+
+/** The response of POST /backup: the current status plus the backup's path. */
+export interface BackupResponse extends Status {
+  backup_path: string;
+}
+
+/**
+ * POST /backup: snapshots the database, rejecting with an ApiError (status
+ * 409) unless the engine is fully stopped.
+ */
+export function backupDatabase(send: AuthedFetch): Promise<BackupResponse> {
+  return postJSON(send, '/backup');
+}
