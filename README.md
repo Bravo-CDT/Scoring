@@ -28,9 +28,10 @@ ADMIN_PASSWORD_HASH='<hash>' make run
 To run it against the actual lab network:
 
 ```sh
-cp config.lab.yaml config.yaml   # real hosts/services; no secrets in the file itself
+cp config.lab.yaml config.yaml   # real hosts/services, with the comp's known
+                                  # default service password baked in
 make hash PASSWORD=yourpassword
-ADMIN_PASSWORD_HASH='<hash>' PG_PASSWORD='...' SMB_PASSWORD='...' SMTP_PASSWORD='...' make run
+ADMIN_PASSWORD_HASH='<hash>' make run
 ```
 
 Once it's running, open `http://<host>:8080/` for the public scoreboard.
