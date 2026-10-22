@@ -722,6 +722,30 @@ func TestAdjustScore_RejectedUnlessScoringIsPaused(t *testing.T) {
 	}
 }
 
+func TestAdjustScore_RejectsDeltaBeyondTheMax(t *testing.T) {
+	h := newHarness(t, okCheck, "svc1")
+	if err := h.e.AdjustScore(store.SideBlue, MaxAdjustmentPoints+1, "test"); !errors.Is(err, ErrInvalidAdjustment) {
+		t.Fatalf("AdjustScore(MaxAdjustmentPoints+1): got %v, want ErrInvalidAdjustment", err)
+	}
+	if err := h.e.AdjustScore(store.SideBlue, -(MaxAdjustmentPoints + 1), "test"); !errors.Is(err, ErrInvalidAdjustment) {
+		t.Fatalf("AdjustScore(-(MaxAdjustmentPoints+1)): got %v, want ErrInvalidAdjustment", err)
+	}
+	// Exactly the max, in either direction, is still allowed.
+	if err := h.e.AdjustScore(store.SideBlue, MaxAdjustmentPoints, "test"); err != nil {
+		t.Errorf("AdjustScore(MaxAdjustmentPoints): %v, want no error", err)
+	}
+}
+
+func TestAdjustScore_RejectsAnUnknownSideAndZeroDelta(t *testing.T) {
+	h := newHarness(t, okCheck, "svc1")
+	if err := h.e.AdjustScore("manual", 10, "test"); !errors.Is(err, ErrInvalidAdjustment) {
+		t.Fatalf("AdjustScore(manual side): got %v, want ErrInvalidAdjustment", err)
+	}
+	if err := h.e.AdjustScore(store.SideBlue, 0, "test"); !errors.Is(err, ErrInvalidAdjustment) {
+		t.Fatalf("AdjustScore(0 delta): got %v, want ErrInvalidAdjustment", err)
+	}
+}
+
 func TestAdjustScore_AllowedWhileScoringPausedEvenIfEngineRunning(t *testing.T) {
 	h := newHarness(t, okCheck, "svc1")
 	h.start(t)

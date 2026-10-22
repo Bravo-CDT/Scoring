@@ -1,8 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { getStatus, type Status } from '../api/client';
 
-/** How long after a round is due to poll, so the poll lands after it is recorded. */
-const ROUND_SETTLE_MS = 3_000;
 const MIN_DELAY_MS = 1_000;
 export const MAX_DELAY_MS = 30_000;
 /** The delay whenever next_round_at gives nothing to go on, and after a failed fetch. */
@@ -36,24 +34,48 @@ function burstWindowMs(roundLengthMs: number): number {
  * or pass MAX_DELAY_MS, for the widest 4s window), polls every 500ms so the
  * live "Scoring…" tag doesn't get missed between polls timed for later.
  *
- * Outside that window, waits until shortly after that round is due, clamped
- * to [1s, 30s]. A `next_round_at` that is not in the future (and outside the
- * burst window) gives no usable prediction, and falls back to a fixed 5s
- * rather than a zero or negative delay that would poll in a tight loop. That
+ * Outside that window, aims to land the *next* poll right as the window
+ * opens (untilRound - the window's width), clamped to [1s, 30s] -- not
+ * shortly after the round is due, which only reads the window correctly if
+ * the fetch happens to land strictly before the round begins. Because the
+ * scheduler publishes next_round_at the instant a round begins (not once it
+ * finishes), a poll timed to land *after* one boundary already sees the
+ * *next* boundary by the time it fetches, so aiming "after" drifts a full
+ * round length away from the window every single round and the window is
+ * essentially never reached in steady state. Landing "before" it only ever
+ * needs one correction to get in sync, however far off the starting point.
+ *
+ * A `next_round_at` that is not in the future (and outside the burst
+ * window) gives no usable prediction, and falls back to a fixed 5s rather
+ * than a zero or negative delay that would poll in a tight loop. That
  * covers Go's zero time (0001-01-01T00:00:00Z, before the engine's first
  * round) and a stale past value (nothing enabled, or a slow check that made
  * a round land later than predicted) — both deliberate backend behaviors.
  */
 export function nextPollDelayMs(nextRoundAt: string, now: Date, roundLengthMs = MAX_DELAY_MS): number {
   const untilRound = Date.parse(nextRoundAt) - now.getTime();
+  const window = burstWindowMs(roundLengthMs);
   // NaN (unparseable) fails this comparison too, falling through below.
-  if (Math.abs(untilRound) <= burstWindowMs(roundLengthMs)) {
+  if (Math.abs(untilRound) <= window) {
     return BURST_INTERVAL_MS;
   }
   if (!(untilRound > 0)) {
     return FALLBACK_DELAY_MS;
   }
-  return Math.min(Math.max(untilRound + ROUND_SETTLE_MS, MIN_DELAY_MS), MAX_DELAY_MS);
+  return Math.min(Math.max(untilRound - window, MIN_DELAY_MS), MAX_DELAY_MS);
+}
+
+/**
+ * Overrides delay with the burst interval whenever any service in the
+ * latest status has its check in flight right now, so a check that runs
+ * longer than the burst window (nothing bounds how long a check can take
+ * beyond the round interval itself) doesn't fall back to the normal
+ * schedule while it's still running -- this is also what catches the
+ * "just after the boundary" half of the window, now that the window
+ * itself only ever reaches up to the boundary (see nextPollDelayMs).
+ */
+export function withCheckingOverride(delay: number, services: { checking: boolean }[]): number {
+  return services.some((s) => s.checking) ? BURST_INTERVAL_MS : delay;
 }
 
 export interface StatusPolling {
@@ -109,7 +131,10 @@ export function useStatusPolling(): StatusPolling {
         }
         // Measure the delay against the engine's own clock, so a skewed
         // browser clock cannot shift when this polls relative to rounds.
-        delay = nextPollDelayMs(status.next_round_at, serverNow, roundLengthMs.current);
+        delay = withCheckingOverride(
+          nextPollDelayMs(status.next_round_at, serverNow, roundLengthMs.current),
+          status.services,
+        );
         const offset = serverNow.getTime() - Date.now();
         setState({
           status,

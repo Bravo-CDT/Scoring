@@ -1,11 +1,48 @@
 package api
 
 import (
+	"fmt"
 	"net/http"
 	"os"
+	"path/filepath"
 
 	"github.com/Bravo-CDT/Scoring/internal/config"
 )
+
+// atomicWriteFile writes data to path by writing a temp file in the same
+// directory, syncing it, then renaming it over path. A reader (the 5s
+// config-status poll, a routine (re)start reading the file mid-save) never
+// observes a truncated file, and a crash or a full disk partway through
+// leaves the original file exactly as it was, rather than leaving
+// config.yaml unparseable on the engine's next boot.
+func atomicWriteFile(path string, data []byte, perm os.FileMode) error {
+	dir := filepath.Dir(path)
+	tmp, err := os.CreateTemp(dir, "."+filepath.Base(path)+".tmp-*")
+	if err != nil {
+		return fmt.Errorf("creating temp file in %s: %w", dir, err)
+	}
+	tmpPath := tmp.Name()
+	defer os.Remove(tmpPath) // a no-op once the rename below has succeeded
+
+	if _, err := tmp.Write(data); err != nil {
+		tmp.Close()
+		return fmt.Errorf("writing temp file: %w", err)
+	}
+	if err := tmp.Sync(); err != nil {
+		tmp.Close()
+		return fmt.Errorf("syncing temp file: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		return fmt.Errorf("closing temp file: %w", err)
+	}
+	if err := os.Chmod(tmpPath, perm); err != nil {
+		return fmt.Errorf("setting permissions on temp file: %w", err)
+	}
+	if err := os.Rename(tmpPath, path); err != nil {
+		return fmt.Errorf("renaming temp file into place: %w", err)
+	}
+	return nil
+}
 
 type getConfigResponse struct {
 	Text string `json:"text"`
@@ -57,10 +94,13 @@ type saveConfigResponse struct {
 // separate, existing POST /reload.
 func (s *server) handleSaveConfig(w http.ResponseWriter, r *http.Request) {
 	var req saveConfigRequest
-	if err := decodeJSON(w, r, &req); err != nil {
+	if err := decodeJSONLimit(w, r, &req, maxConfigBodyBytes); err != nil {
 		writeBodyError(w, err)
 		return
 	}
+
+	s.configWriteMu.Lock()
+	defer s.configWriteMu.Unlock()
 
 	current, err := os.ReadFile(s.configPath)
 	if err != nil {
@@ -78,7 +118,7 @@ func (s *server) handleSaveConfig(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := os.WriteFile(s.configPath, raw, 0o600); err != nil {
+	if err := atomicWriteFile(s.configPath, raw, 0o600); err != nil {
 		s.adminError(w, r, err)
 		return
 	}

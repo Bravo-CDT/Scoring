@@ -724,7 +724,10 @@ function DoubleConfirmButton({
 }: DoubleConfirmButtonProps) {
   const [step, setStep] = useState<0 | 1 | 2>(0);
   const [backup, setBackup] = useState(true);
-  const close = () => setStep(0);
+  const close = () => {
+    setStep(0);
+    setBackup(true); // reset so the next attempt starts checked by default, per spec
+  };
 
   return (
     <>
@@ -742,7 +745,14 @@ function DoubleConfirmButton({
             {confirmMessage}
           </Text>
           {step === 1 && (
-            <Checkbox label="Back up first" checked={backup} onChange={(e) => setBackup(e.currentTarget.checked)} />
+            <>
+              <Checkbox label="Back up first" checked={backup} onChange={(e) => setBackup(e.currentTarget.checked)} />
+              {!backup && (
+                <Alert color="yellow" title="No backup will be taken">
+                  Proceeding without a backup means this cannot be undone at all.
+                </Alert>
+              )}
+            </>
           )}
           <Group justify="flex-end" gap="sm">
             <Button variant="default" onClick={close} data-autofocus>

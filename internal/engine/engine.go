@@ -38,6 +38,18 @@ var ErrScoringNotPaused = errors.New("engine: scoring must be paused for a manua
 // require the engine fully stopped first.
 var ErrEngineRunning = errors.New("engine: must be stopped for this action")
 
+// MaxAdjustmentPoints bounds a manual adjustment's magnitude. Without a
+// bound, a typo (or a deliberately huge value) can push a side's ledger
+// balance close enough to math.MaxInt64 that a later adjustment, or even
+// ordinary scoring, overflows the SQL SUM in store.sideBalance, breaking
+// GetScore (and so GET /status) until the session's round data is reset.
+const MaxAdjustmentPoints = 1_000_000
+
+// ErrInvalidAdjustment is returned by AdjustScore for a side other than
+// blue/red, a zero delta, or a delta whose magnitude exceeds
+// MaxAdjustmentPoints.
+var ErrInvalidAdjustment = errors.New("engine: invalid score adjustment")
+
 // Event types the Engine writes.
 const (
 	EventEngineStarted         = "engine_started"
@@ -265,6 +277,10 @@ func (e *Engine) setGlobalScoringPaused(paused bool, eventType, message string) 
 // it must stay usable even while a control operation is stuck in mu, so it
 // does not take mu.
 func (e *Engine) AdjustScore(side string, delta int, reason string) error {
+	if (side != store.SideBlue && side != store.SideRed) ||
+		delta == 0 || delta > MaxAdjustmentPoints || delta < -MaxAdjustmentPoints {
+		return ErrInvalidAdjustment
+	}
 	rs, err := e.store.GetRunState()
 	if err != nil {
 		return fmt.Errorf("engine: adjusting score: %w", err)

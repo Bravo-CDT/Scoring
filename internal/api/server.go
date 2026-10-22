@@ -16,6 +16,7 @@ import (
 	"log"
 	"net/http"
 	"strconv"
+	"sync"
 
 	"github.com/Bravo-CDT/Scoring/internal/auth"
 	"github.com/Bravo-CDT/Scoring/internal/engine"
@@ -25,9 +26,13 @@ import (
 const (
 	defaultPageLimit = 50
 	maxPageLimit     = 500
-	// maxBodyBytes bounds every request body the API reads; the largest
-	// legitimate one is a login.
+	// maxBodyBytes bounds every request body the API reads except a config
+	// save; the largest other legitimate one is a login.
 	maxBodyBytes = 4 << 10
+	// maxConfigBodyBytes bounds a POST /config body: a whole config.yaml,
+	// which can legitimately run well past maxBodyBytes as services are
+	// added (config.example.yaml itself is already close to maxBodyBytes).
+	maxConfigBodyBytes = 1 << 20
 
 	genericInternalError = "internal server error"
 )
@@ -43,6 +48,12 @@ type server struct {
 	mux        *http.ServeMux
 	// fallback, if set, serves GET and HEAD requests that match no route.
 	fallback http.Handler
+	// configWriteMu serializes POST /config's read-compare-write sequence,
+	// so two concurrent saves against the same expected_hash cannot both
+	// read the file before either writes it -- without this, both read the
+	// same "current" hash, both pass the conflict check, and the second
+	// write silently overwrites the first.
+	configWriteMu sync.Mutex
 }
 
 // Option configures NewServer.
@@ -227,7 +238,13 @@ var (
 // of at most maxBodyBytes with no fields dst does not know, into dst. An
 // empty body is errEmptyBody.
 func decodeJSON(w http.ResponseWriter, r *http.Request, dst any) error {
-	r.Body = http.MaxBytesReader(w, r.Body, maxBodyBytes)
+	return decodeJSONLimit(w, r, dst, maxBodyBytes)
+}
+
+// decodeJSONLimit is decodeJSON with a caller-chosen body size limit, for the
+// one route (POST /config) whose legitimate bodies run past maxBodyBytes.
+func decodeJSONLimit(w http.ResponseWriter, r *http.Request, dst any, limit int64) error {
+	r.Body = http.MaxBytesReader(w, r.Body, limit)
 	dec := json.NewDecoder(r.Body)
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(dst); err != nil {

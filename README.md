@@ -40,6 +40,22 @@ engine and resume scoring (or `POST /login` then `POST /engine/start` and
 `POST /scoring/resume` directly). See `config.example.yaml` for the full
 config reference.
 
+## Backups
+
+The admin console has a "Back up now" button (and "Reset for a new round"
+takes one by default too), both requiring the engine stopped first. Each
+backup is a complete snapshot written to a `backups/` directory next to the
+database file (e.g. `backups/scoring-20261022T190000Z.db` next to
+`scoring.db`), safe to copy elsewhere at any time.
+
+There is no restore button; restoring one is a manual, three-step process:
+
+```sh
+# Stop the running engine first (Ctrl-C, or however it's being run).
+cp backups/scoring-<timestamp>.db scoring.db   # overwrite the live -db path
+ADMIN_PASSWORD_HASH='<hash>' make run          # start it again
+```
+
 To work on the frontend, run the engine as above in one terminal and
 `make dev` in another: it starts Vite's hot-reloading dev server (it prints
 its URL), which proxies API requests to the engine on `127.0.0.1:8080`. If

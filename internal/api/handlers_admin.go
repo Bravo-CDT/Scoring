@@ -2,6 +2,7 @@ package api
 
 import (
 	"errors"
+	"fmt"
 	"net/http"
 	"time"
 
@@ -243,13 +244,20 @@ func (s *server) handleAdjustScore(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "points must not be zero")
 		return
 	}
+	if req.Points > engine.MaxAdjustmentPoints || req.Points < -engine.MaxAdjustmentPoints {
+		writeError(w, http.StatusBadRequest, fmt.Sprintf("points must be within +/-%d", engine.MaxAdjustmentPoints))
+		return
+	}
 
 	if err := s.engine.AdjustScore(side, req.Points, req.Reason); err != nil {
-		if errors.Is(err, engine.ErrScoringNotPaused) {
+		switch {
+		case errors.Is(err, engine.ErrScoringNotPaused):
 			s.writeConflict(w, err)
-			return
+		case errors.Is(err, engine.ErrInvalidAdjustment):
+			writeError(w, http.StatusBadRequest, err.Error())
+		default:
+			s.adminError(w, r, err)
 		}
-		s.adminError(w, r, err)
 		return
 	}
 	s.writeCurrentStatus(w, r)

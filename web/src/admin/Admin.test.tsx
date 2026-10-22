@@ -289,6 +289,40 @@ describe('Admin', () => {
     expect(await screen.findByText(/backups\/x\.db/)).toBeInTheDocument();
   });
 
+  it('shows an inline warning when backup is unchecked', async () => {
+    localStorage.setItem(TOKEN_STORAGE_KEY, 'tok');
+    vi.spyOn(client, 'getStatus').mockResolvedValue({ ...status, engine_state: 'stopped' });
+    stubApi();
+    const user = userEvent.setup();
+    render(<Admin />);
+
+    await user.click(await screen.findByRole('button', { name: 'Reset for a new round' }));
+    await screen.findByRole('dialog');
+    await user.click(await screen.findByRole('checkbox', { name: /back up first/i }));
+
+    expect(await screen.findByText(/without a backup/i)).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: 'Cancel' }));
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
+  });
+
+  it('resets the backup checkbox to checked after cancelling', async () => {
+    localStorage.setItem(TOKEN_STORAGE_KEY, 'tok');
+    vi.spyOn(client, 'getStatus').mockResolvedValue({ ...status, engine_state: 'stopped' });
+    stubApi();
+    const user = userEvent.setup();
+    render(<Admin />);
+
+    await user.click(await screen.findByRole('button', { name: 'Reset for a new round' }));
+    await screen.findByRole('dialog');
+    await user.click(await screen.findByRole('checkbox', { name: /back up first/i }));
+    await user.click(screen.getByRole('button', { name: 'Cancel' }));
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
+
+    await user.click(await screen.findByRole('button', { name: 'Reset for a new round' }));
+    await screen.findByRole('dialog');
+    expect(await screen.findByRole('checkbox', { name: /back up first/i })).toBeChecked();
+  });
+
   it('disables Reset for a new round while the engine is running', async () => {
     localStorage.setItem(TOKEN_STORAGE_KEY, 'tok');
     stubApi(); // status.engine_state defaults to 'running' in the shared fixture

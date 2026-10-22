@@ -889,6 +889,45 @@ func TestConfigStatus_StaleAfterASaveBeforeReload(t *testing.T) {
 	}
 }
 
+// TestSaveConfig_ConcurrentSavesWithTheSameExpectedHashOnlyOneWins guards
+// against a TOCTOU race: the hash check, validation and write must not
+// interleave across two concurrent requests, or both can read the same
+// "current" hash and both succeed, the second silently overwriting the
+// first -- exactly what the conflict check exists to prevent.
+func TestSaveConfig_ConcurrentSavesWithTheSameExpectedHashOnlyOneWins(t *testing.T) {
+	h := newHarness(t, okCheck, "svc1")
+	token := h.login()
+	get := h.do(http.MethodGet, "/config", token, "").object(t)
+	hash := get["hash"].(string)
+
+	var wg sync.WaitGroup
+	statuses := make([]int, 2)
+	for i := range 2 {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			body := fmt.Sprintf(`{"text": %q, "expected_hash": %q}`, configYAML("svc1", fmt.Sprintf("svc-race-%d", i)), hash)
+			statuses[i] = h.do(http.MethodPost, "/config", token, body).status
+		}(i)
+	}
+	wg.Wait()
+
+	oks, conflicts := 0, 0
+	for _, s := range statuses {
+		switch s {
+		case http.StatusOK:
+			oks++
+		case http.StatusConflict:
+			conflicts++
+		default:
+			t.Errorf("unexpected status %d", s)
+		}
+	}
+	if oks != 1 || conflicts != 1 {
+		t.Fatalf("statuses = %v, want exactly one 200 and one 409", statuses)
+	}
+}
+
 func TestSaveConfig_RejectsAStaleExpectedHash(t *testing.T) {
 	h := newHarness(t, okCheck, "svc1")
 	token := h.login()
@@ -915,11 +954,73 @@ func TestSaveConfig_RejectsInvalidYAMLAndWritesNothing(t *testing.T) {
 	}
 }
 
+// TestSaveConfig_AcceptsABodyLargerThanTheGenericLimit guards against
+// POST /config sharing the generic maxBodyBytes limit (4KiB): a real
+// config.yaml with more than a handful of services routinely exceeds that
+// (config.example.yaml itself is already close to it).
+func TestSaveConfig_AcceptsABodyLargerThanTheGenericLimit(t *testing.T) {
+	h := newHarness(t, okCheck, "svc1")
+	token := h.login()
+	get := h.do(http.MethodGet, "/config", token, "").object(t)
+
+	names := make([]string, 40)
+	for i := range names {
+		names[i] = fmt.Sprintf("svc%d", i)
+	}
+	big := configYAML(names...)
+	if len(big) <= 4<<10 {
+		t.Fatalf("test fixture is %d bytes, want more than the generic 4KiB limit to actually exercise it", len(big))
+	}
+	body, err := json.Marshal(map[string]string{"text": big, "expected_hash": get["hash"].(string)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	res := h.do(http.MethodPost, "/config", token, string(body))
+	h.mustStatus(res, http.StatusOK, "save a large config")
+}
+
+// TestSaveConfig_RejectsValidYAMLThatFailsConfigValidation pins Review Focus
+// item 4: syntactically valid YAML that fails the engine's own config
+// validation (as opposed to a YAML parse error) must still answer 400 with
+// the real validation error, and must leave the file untouched.
+func TestSaveConfig_RejectsValidYAMLThatFailsConfigValidation(t *testing.T) {
+	h := newHarness(t, okCheck, "svc1")
+	token := h.login()
+	get := h.do(http.MethodGet, "/config", token, "").object(t)
+	before, err := os.ReadFile(h.configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	badYAML := strings.Replace(configYAML("svc1"), "check_type: tcp_connect", "check_type: bogus_check", 1)
+	res := h.do(http.MethodPost, "/config", token, fmt.Sprintf(`{"text": %q, "expected_hash": %q}`, badYAML, get["hash"]))
+	h.mustStatus(res, http.StatusBadRequest, "save config with an unknown check_type")
+	if msg, _ := res.object(t)["error"].(string); !strings.Contains(msg, "bogus_check") {
+		t.Errorf("error = %q, want it to name the bad check_type", msg)
+	}
+
+	after, err := os.ReadFile(h.configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(before) != string(after) {
+		t.Fatal("a save that fails config validation must not touch the file on disk")
+	}
+}
+
 func TestAdjustScore_RejectsAnUnknownSide(t *testing.T) {
 	h := newHarness(t, okCheck, "svc1")
 	token := h.login()
 	res := h.do(http.MethodPost, "/teams/manual/adjust", token, `{"points": 10, "reason": "x"}`)
 	h.mustStatus(res, http.StatusBadRequest, "adjust unknown side")
+}
+
+func TestAdjustScore_RejectsPointsBeyondTheMax(t *testing.T) {
+	h := newHarness(t, okCheck, "svc1")
+	token := h.login()
+	res := h.do(http.MethodPost, "/teams/blue/adjust", token,
+		fmt.Sprintf(`{"points": %d, "reason": "x"}`, engine.MaxAdjustmentPoints+1))
+	h.mustStatus(res, http.StatusBadRequest, "adjust beyond the max")
 }
 
 func TestAdjustScore_RejectsZeroPoints(t *testing.T) {
@@ -991,6 +1092,55 @@ func TestResetRound_WithoutBackupOmitsPath(t *testing.T) {
 	h.mustStatus(res, http.StatusOK, "reset without backup")
 	if _, ok := res.object(t)["backup_path"]; ok {
 		t.Errorf(`expected "backup_path" to be absent, got %v`, res.object(t)["backup_path"])
+	}
+}
+
+func TestAtomicWriteFile_WritesContentAndPermissions(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	if err := atomicWriteFile(path, []byte("hello"), 0o600); err != nil {
+		t.Fatalf("atomicWriteFile: %v", err)
+	}
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "hello" {
+		t.Errorf("content = %q, want %q", got, "hello")
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0o600 {
+		t.Errorf("mode = %v, want 0600", info.Mode().Perm())
+	}
+}
+
+// TestAtomicWriteFile_FailureLeavesTheOriginalUntouched pins the fix for
+// Important item 5: a failed save must never leave config.yaml truncated or
+// partially written. Simulated here by making the directory unwritable so
+// the temp file can't even be created, before anything touches the
+// original.
+func TestAtomicWriteFile_FailureLeavesTheOriginalUntouched(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	if err := os.WriteFile(path, []byte("original"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(dir, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	defer os.Chmod(dir, 0o700) // restore so t.TempDir() can clean up
+
+	if err := atomicWriteFile(path, []byte("new content"), 0o600); err == nil {
+		t.Fatal("expected atomicWriteFile to fail when it cannot create a temp file in the directory")
+	}
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "original" {
+		t.Errorf("content after a failed write = %q, want the untouched original %q", got, "original")
 	}
 }
 
