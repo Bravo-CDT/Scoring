@@ -621,6 +621,29 @@ func TestRoundStatus_AdvancesOnlyAfterARoundWithSomethingEnabledCompletes(t *tes
 	}
 }
 
+func TestRoundStatus_PublishesProjectedNextRoundAtAsSoonAsTheRoundBegins(t *testing.T) {
+	checkStarted := make(chan struct{})
+	release := make(chan struct{})
+	slowCheck := func(context.Context, string, map[string]any) checks.Result {
+		close(checkStarted)
+		<-release
+		return checks.Result{Success: true}
+	}
+	sink := &fakeSink{}
+	s := newScheduler(t, registryWith(slowCheck), sink, newConfig(t), testRound)
+	run(t, s)
+	mustStart(t, s, 1, "svc1")
+
+	receive(t, "check to start", checkStarted)
+	_, nextRoundAt := s.RoundStatus()
+	close(release)
+
+	if nextRoundAt.IsZero() {
+		t.Fatal("RoundStatus returned a zero nextRoundAt while svc1's check was still running; " +
+			"it should already reflect this round's projected end")
+	}
+}
+
 func TestHungCheckIsForceFailedAtDeadline(t *testing.T) {
 	sink := &fakeSink{}
 	s := newTestScheduler(t, registryWith(func(ctx context.Context, _ string, _ map[string]any) checks.Result {

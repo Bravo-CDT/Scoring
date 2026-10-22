@@ -146,6 +146,7 @@ func (s *Scheduler) runRound(ctx context.Context, round int, start time.Time) bo
 	batch, ctxs := s.beginRound(ctx)
 	var results []checks.RoundResult
 	if len(batch) > 0 {
+		s.publishProjectedRoundStatus(start)
 		results = s.runChecks(ctxs, batch)
 	}
 
@@ -240,6 +241,20 @@ func (s *Scheduler) RoundStatus() (round int, nextRoundAt time.Time) {
 	s.statusMu.Lock()
 	defer s.statusMu.Unlock()
 	return s.lastRound, s.nextRoundAt
+}
+
+// publishProjectedRoundStatus publishes the round's projected nextRoundAt
+// (start.Add(roundInterval)) as soon as the round begins, instead of only
+// once it finishes. setRoundStatus still runs at the end and corrects it
+// (clamping to now if the round overran) and advances lastRound; this only
+// ever moves nextRoundAt forward in the meantime, never backward. Without
+// this, RoundStatus would keep reporting the previous round's value — frozen
+// near the current round's start — for however long this round's checks take
+// to run.
+func (s *Scheduler) publishProjectedRoundStatus(start time.Time) {
+	s.statusMu.Lock()
+	s.nextRoundAt = start.Add(s.roundInterval)
+	s.statusMu.Unlock()
 }
 
 // setRoundStatus records that round, which began at start, has been recorded.
