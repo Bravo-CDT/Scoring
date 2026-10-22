@@ -16,8 +16,24 @@ const status: client.Status = {
   round: 5,
   next_round_at: '2026-10-18T12:00:05Z',
   services: [
-    { name: 'web', up: true, routine_enabled: true, scoring_paused: false, latency_ms: 4, consecutive_failures: 0 },
-    { name: 'dns', up: false, routine_enabled: true, scoring_paused: false, latency_ms: 0, consecutive_failures: 2 },
+    {
+      name: 'web',
+      up: true,
+      routine_enabled: true,
+      checking: false,
+      scoring_paused: false,
+      latency_ms: 4,
+      consecutive_failures: 0,
+    },
+    {
+      name: 'dns',
+      up: false,
+      routine_enabled: true,
+      checking: false,
+      scoring_paused: false,
+      latency_ms: 0,
+      consecutive_failures: 2,
+    },
   ],
 };
 
@@ -43,6 +59,15 @@ describe('Scoreboard', () => {
     vi.spyOn(client, 'getStatus').mockResolvedValue(status);
     render(<Scoreboard />);
     expect(await screen.findByRole('link', { name: 'Admin' })).toHaveAttribute('href', '/admin');
+  });
+
+  it('shows a Scoring badge while a service check is in flight', async () => {
+    vi.spyOn(client, 'getStatus').mockResolvedValue({
+      ...status,
+      services: [{ ...status.services[0], checking: true }, { ...status.services[1], checking: false }],
+    });
+    render(<Scoreboard />);
+    expect(await screen.findByText('Scoring…')).toBeInTheDocument();
   });
 
   it("opens a service's history when its row is clicked, and closes it", async () => {

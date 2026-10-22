@@ -129,9 +129,16 @@ function ServiceRow({ service, onSelect }: { service: ServiceStatus; onSelect: (
       <Paper withBorder px="md" py="sm" radius="md">
         <Group justify="space-between">
           <Text fw={500}>{service.name}</Text>
-          <Badge color={service.up ? 'green' : 'red'} variant="filled">
-            {service.up ? 'Up' : 'Down'}
-          </Badge>
+          <Group gap={6}>
+            {service.checking && (
+              <Badge color="blue" variant="light">
+                Scoring…
+              </Badge>
+            )}
+            <Badge color={service.up ? 'green' : 'red'} variant="filled">
+              {service.up ? 'Up' : 'Down'}
+            </Badge>
+          </Group>
         </Group>
       </Paper>
     </UnstyledButton>

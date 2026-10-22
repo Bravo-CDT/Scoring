@@ -1,6 +1,7 @@
 import { screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import * as client from '../api/client';
 import type { Status } from '../api/client';
 import { render } from '../test/render';
 import { Admin } from './Admin';
@@ -17,7 +18,15 @@ const status: Status = {
   round: 5,
   next_round_at: '2026-10-18T12:00:05Z',
   services: [
-    { name: 'web', up: true, routine_enabled: true, scoring_paused: false, latency_ms: 4, consecutive_failures: 0 },
+    {
+      name: 'web',
+      up: true,
+      routine_enabled: true,
+      checking: false,
+      scoring_paused: false,
+      latency_ms: 4,
+      consecutive_failures: 0,
+    },
   ],
 };
 
@@ -56,6 +65,7 @@ beforeEach(() => {
 
 afterEach(() => {
   vi.unstubAllGlobals();
+  vi.restoreAllMocks();
 });
 
 describe('Admin', () => {
@@ -81,6 +91,17 @@ describe('Admin', () => {
     await user.click(screen.getByRole('button', { name: 'Log in' }));
     expect(await screen.findByRole('button', { name: 'Stop engine' })).toBeInTheDocument();
     expect(localStorage.getItem(TOKEN_STORAGE_KEY)).toBe('tok');
+  });
+
+  it('shows a Scoring badge while a service check is in flight', async () => {
+    localStorage.setItem(TOKEN_STORAGE_KEY, 'tok');
+    stubApi();
+    vi.spyOn(client, 'getStatus').mockResolvedValue({
+      ...status,
+      services: [{ ...status.services[0], checking: true }],
+    });
+    render(<Admin />);
+    expect(await screen.findByText('Scoring…')).toBeInTheDocument();
   });
 
   it('asks before stopping the engine, and sends nothing when cancelled', async () => {

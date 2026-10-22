@@ -359,6 +359,11 @@ function ServiceRow({ service, busy, perform }: { service: ServiceStatus; busy: 
       <Table.Td fw={500}>{name}</Table.Td>
       <Table.Td>
         <Group gap={6}>
+          {service.checking && (
+            <Badge color="blue" variant="light">
+              Scoring…
+            </Badge>
+          )}
           <Badge color={service.up ? 'green' : 'red'} variant="filled">
             {service.up ? 'Up' : 'Down'}
           </Badge>

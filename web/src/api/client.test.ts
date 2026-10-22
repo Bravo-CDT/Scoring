@@ -40,6 +40,7 @@ describe('getStatus', () => {
           name: 'web',
           up: true,
           routine_enabled: true,
+          checking: false,
           scoring_paused: false,
           latency_ms: 4,
           consecutive_failures: 0,

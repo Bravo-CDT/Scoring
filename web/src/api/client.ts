@@ -13,6 +13,8 @@ export interface ServiceStatus {
   up: boolean;
   /** Whether the service's check routine is running. */
   routine_enabled: boolean;
+  /** Whether the service's check is part of the round in progress right now. */
+  checking: boolean;
   /** The service's own scoring pause; the global one is Status.scoring_paused. */
   scoring_paused: boolean;
   /** When the latest check ran; absent before any check. */
