@@ -864,6 +864,57 @@ func TestCountdown_RejectsABadBody(t *testing.T) {
 	}
 }
 
+func TestGetConfig_ReturnsRawTextAndHash(t *testing.T) {
+	h := newHarness(t, okCheck, "svc1")
+	token := h.login()
+	res := h.do(http.MethodGet, "/config", token, "")
+	h.mustStatus(res, http.StatusOK, "get config")
+	body := res.object(t)
+	if body["text"] == "" || body["hash"] == "" {
+		t.Fatalf("expected non-empty text and hash, got %#v", body)
+	}
+}
+
+func TestConfigStatus_StaleAfterASaveBeforeReload(t *testing.T) {
+	h := newHarness(t, okCheck, "svc1")
+	token := h.login()
+	get := h.do(http.MethodGet, "/config", token, "").object(t)
+	saved := h.do(http.MethodPost, "/config", token, fmt.Sprintf(`{"text": %q, "expected_hash": %q}`,
+		configYAML("svc1", "svc2"), get["hash"]))
+	h.mustStatus(saved, http.StatusOK, "save config")
+
+	status := h.do(http.MethodGet, "/config/status", token, "").object(t)
+	if status["stale"] != true {
+		t.Fatalf("expected stale=true right after a save with no reload yet, got %#v", status)
+	}
+}
+
+func TestSaveConfig_RejectsAStaleExpectedHash(t *testing.T) {
+	h := newHarness(t, okCheck, "svc1")
+	token := h.login()
+	res := h.do(http.MethodPost, "/config", token, `{"text": "session_name: x", "expected_hash": "not-the-real-hash"}`)
+	h.mustStatus(res, http.StatusConflict, "save with stale hash")
+}
+
+func TestSaveConfig_RejectsInvalidYAMLAndWritesNothing(t *testing.T) {
+	h := newHarness(t, okCheck, "svc1")
+	token := h.login()
+	get := h.do(http.MethodGet, "/config", token, "").object(t)
+	before, err := os.ReadFile(h.configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	res := h.do(http.MethodPost, "/config", token, fmt.Sprintf(`{"text": "not: valid: yaml: at all:", "expected_hash": %q}`, get["hash"]))
+	h.mustStatus(res, http.StatusBadRequest, "save invalid yaml")
+	after, err := os.ReadFile(h.configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(before) != string(after) {
+		t.Fatal("an invalid save must not touch the file on disk")
+	}
+}
+
 func TestReload(t *testing.T) {
 	h := newHarness(t, okCheck, "svc1")
 	token := h.login()
