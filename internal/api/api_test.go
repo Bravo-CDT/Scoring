@@ -948,6 +948,24 @@ func TestAdjustScore_SucceedsWhilePaused(t *testing.T) {
 	}
 }
 
+func TestBackup_ConflictWhileEngineIsRunning(t *testing.T) {
+	h := newHarness(t, okCheck, "svc1")
+	token := h.login()
+	h.mustStatus(h.do(http.MethodPost, "/engine/start", token, ""), http.StatusOK, "start engine")
+	res := h.do(http.MethodPost, "/backup", token, "")
+	h.mustStatus(res, http.StatusConflict, "backup while running")
+}
+
+func TestBackup_SucceedsWhileStoppedAndReportsThePath(t *testing.T) {
+	h := newHarness(t, okCheck, "svc1")
+	token := h.login()
+	res := h.do(http.MethodPost, "/backup", token, "")
+	h.mustStatus(res, http.StatusOK, "backup while stopped")
+	if res.object(t)["backup_path"] == "" {
+		t.Fatal("expected a non-empty backup_path")
+	}
+}
+
 func TestReload(t *testing.T) {
 	h := newHarness(t, okCheck, "svc1")
 	token := h.login()

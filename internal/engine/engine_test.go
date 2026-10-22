@@ -734,6 +734,25 @@ func TestAdjustScore_AllowedWhileScoringPausedEvenIfEngineRunning(t *testing.T) 
 	}
 }
 
+func TestBackupDatabase_RejectedWhileEngineIsRunning(t *testing.T) {
+	h := newHarness(t, okCheck, "svc1")
+	h.start(t)
+	if _, err := h.e.BackupDatabase(); !errors.Is(err, ErrEngineRunning) {
+		t.Fatalf("BackupDatabase while running: got %v, want ErrEngineRunning", err)
+	}
+}
+
+func TestBackupDatabase_SucceedsWhileStopped(t *testing.T) {
+	h := newHarness(t, okCheck, "svc1") // engine starts stopped
+	path, err := h.e.BackupDatabase()
+	if err != nil {
+		t.Fatalf("BackupDatabase: %v", err)
+	}
+	if path == "" {
+		t.Fatal("expected a non-empty backup path")
+	}
+}
+
 // stuckSink is a ResultSink whose first RecordRound signals inRecord and then
 // blocks until release is closed, before passing the round on.
 type stuckSink struct {

@@ -34,6 +34,10 @@ var ErrServiceNotFound = errors.New("engine: unknown service")
 // pause is not in effect.
 var ErrScoringNotPaused = errors.New("engine: scoring must be paused for a manual adjustment")
 
+// ErrEngineRunning is returned by BackupDatabase and ResetRound: both
+// require the engine fully stopped first.
+var ErrEngineRunning = errors.New("engine: must be stopped for this action")
+
 // Event types the Engine writes.
 const (
 	EventEngineStarted         = "engine_started"
@@ -52,6 +56,7 @@ const (
 	EventConfigSnapshotFailed  = "config_snapshot_failed"
 	EventCountdownChanged      = "countdown_changed"
 	EventScoreAdjusted         = "score_adjusted"
+	EventDatabaseBackedUp      = "database_backed_up"
 )
 
 // StartFailure reports one service whose routine failed to start, for the
@@ -526,6 +531,34 @@ func (e *Engine) recordLoadedConfigHash(configPath string) {
 	e.configHashMu.Lock()
 	e.configHash = config.Hash(raw)
 	e.configHashMu.Unlock()
+}
+
+// BackupDatabase snapshots the database, requiring the engine be fully
+// stopped. Returns the backup file's path.
+func (e *Engine) BackupDatabase() (string, error) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.backupLocked()
+}
+
+// backupLocked is BackupDatabase's body, callable by ResetRound (which
+// already holds mu) without re-locking it.
+func (e *Engine) backupLocked() (string, error) {
+	running, err := e.engineRunning()
+	if err != nil {
+		return "", err
+	}
+	if running {
+		return "", ErrEngineRunning
+	}
+	path, err := e.store.Backup()
+	if err != nil {
+		return "", fmt.Errorf("engine: backing up database: %w", err)
+	}
+	if err := e.logEngineEvent(ActorAdmin, EventDatabaseBackedUp, "database backed up to "+path); err != nil {
+		return path, err
+	}
+	return path, nil
 }
 
 // retire stops svc's routine and deactivates it. The caller holds mu.

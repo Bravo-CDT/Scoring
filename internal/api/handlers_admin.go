@@ -254,3 +254,27 @@ func (s *server) handleAdjustScore(w http.ResponseWriter, r *http.Request) {
 	}
 	s.writeCurrentStatus(w, r)
 }
+
+// backupResponse is the status answer of POST /backup, plus the backup's
+// path.
+type backupResponse struct {
+	engine.Status
+	BackupPath string `json:"backup_path"`
+}
+
+// handleBackup serves POST /backup: a 409 while the engine is running,
+// otherwise the backup's path alongside the current status.
+func (s *server) handleBackup(w http.ResponseWriter, r *http.Request) {
+	path, err := s.engine.BackupDatabase()
+	if err != nil {
+		if errors.Is(err, engine.ErrEngineRunning) {
+			s.writeConflict(w, err)
+			return
+		}
+		s.adminError(w, r, err)
+		return
+	}
+	if status, ok := s.statusAfterAction(w, r); ok {
+		writeJSON(w, http.StatusOK, backupResponse{Status: status, BackupPath: path})
+	}
+}

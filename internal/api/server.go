@@ -101,6 +101,7 @@ func newServer(e *engine.Engine, st *store.Store, sessionID int64, a *auth.Auth,
 	admin("POST /services/{name}/scoring/resume", s.serviceAction(e.ResumeServiceScoring))
 	admin("POST /reload", s.handleReload)
 	admin("POST /teams/{side}/adjust", s.handleAdjustScore)
+	admin("POST /backup", s.handleBackup)
 
 	return s
 }
