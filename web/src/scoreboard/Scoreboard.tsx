@@ -1,6 +1,7 @@
 import {
   Alert,
   Badge,
+  Button,
   Center,
   Container,
   Group,
@@ -41,7 +42,12 @@ export function Scoreboard() {
       <Stack gap="lg">
         <Group justify="space-between" align="baseline">
           <Title order={1}>{status.session_name}</Title>
-          <Freshness status={status} />
+          <Group gap="md" align="baseline">
+            <Freshness status={status} />
+            <Button component="a" href="/admin" variant="subtle" size="xs">
+              Admin
+            </Button>
+          </Group>
         </Group>
 
         {error && (
@@ -55,8 +61,12 @@ export function Scoreboard() {
           <TeamScore team="Red" color="red" score={status.red_score} />
         </SimpleGrid>
 
+        {status.engine_state === 'running' && (
+          <Countdown label="Next round in" target={status.next_round_at} serverClockOffsetMs={serverClockOffsetMs} />
+        )}
+
         {status.countdown_target && (
-          <Countdown target={status.countdown_target} serverClockOffsetMs={serverClockOffsetMs} />
+          <Countdown label="Time remaining" target={status.countdown_target} serverClockOffsetMs={serverClockOffsetMs} />
         )}
 
         <Stack gap="xs">
@@ -135,7 +145,15 @@ function ServiceRow({ service, onSelect }: { service: ServiceStatus; onSelect: (
  * from server_time), so every viewer sees the same remaining time however
  * far off their own clock is — the target was set against the engine's.
  */
-function Countdown({ target, serverClockOffsetMs }: { target: string; serverClockOffsetMs: number }) {
+function Countdown({
+  label,
+  target,
+  serverClockOffsetMs,
+}: {
+  label: string;
+  target: string;
+  serverClockOffsetMs: number;
+}) {
   const targetMs = Date.parse(target);
   const [serverNowMs, setServerNowMs] = useState(() => Date.now() + serverClockOffsetMs);
 
@@ -155,7 +173,7 @@ function Countdown({ target, serverClockOffsetMs }: { target: string; serverCloc
     <Paper withBorder p="md" radius="md">
       <Stack gap={0} align="center">
         <Text c="dimmed" size="sm" tt="uppercase">
-          Time remaining
+          {label}
         </Text>
         <Text fz={40} fw={700} ff="monospace">
           {formatDuration(remainingMs)}

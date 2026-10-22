@@ -26,6 +26,25 @@ afterEach(() => {
 });
 
 describe('Scoreboard', () => {
+  it('shows a countdown to the next round while the engine is running', async () => {
+    vi.spyOn(client, 'getStatus').mockResolvedValue(status);
+    render(<Scoreboard />);
+    expect(await screen.findByText('Next round in')).toBeInTheDocument();
+  });
+
+  it('hides the round countdown when the engine is stopped', async () => {
+    vi.spyOn(client, 'getStatus').mockResolvedValue({ ...status, engine_state: 'stopped' });
+    render(<Scoreboard />);
+    await screen.findByText(status.session_name);
+    expect(screen.queryByText('Next round in')).not.toBeInTheDocument();
+  });
+
+  it('links to the admin console', async () => {
+    vi.spyOn(client, 'getStatus').mockResolvedValue(status);
+    render(<Scoreboard />);
+    expect(await screen.findByRole('link', { name: 'Admin' })).toHaveAttribute('href', '/admin');
+  });
+
   it("opens a service's history when its row is clicked, and closes it", async () => {
     vi.spyOn(client, 'getStatus').mockResolvedValue(status);
     const getResults = vi
