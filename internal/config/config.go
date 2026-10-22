@@ -14,6 +14,8 @@ package config
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"os"
@@ -71,13 +73,20 @@ type Config struct {
 	Services            []ServiceConfig `yaml:"services"`
 }
 
+// Hash returns the sha256 hex digest of raw config file bytes, used to
+// detect whether the file on disk has changed since it was last loaded.
+func Hash(raw []byte) string {
+	sum := sha256.Sum256(raw)
+	return hex.EncodeToString(sum[:])
+}
+
 // Load reads, expands, parses, and validates the config file at path.
 func Load(path string) (*Config, error) {
 	raw, err := os.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("config: reading %s: %w", path, err)
 	}
-	cfg, err := parse(raw)
+	cfg, err := Parse(raw)
 	if err != nil {
 		return nil, fmt.Errorf("config: %s: %w", path, err)
 	}
@@ -101,7 +110,10 @@ func LoadService(path, name string) (*ServiceConfig, error) {
 	return nil, fmt.Errorf("%w: %s", ErrServiceNotFound, name)
 }
 
-func parse(raw []byte) (*Config, error) {
+// Parse expands, parses, and validates raw config file bytes. Load is
+// os.ReadFile plus Parse; callers that already have the bytes in hand (an
+// admin's config-editor save, say) call Parse directly.
+func Parse(raw []byte) (*Config, error) {
 	expanded, err := expandEnv(raw)
 	if err != nil {
 		return nil, err

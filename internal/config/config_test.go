@@ -92,6 +92,22 @@ func setHash(t *testing.T) {
 	t.Setenv(hashEnvVar, realHash)
 }
 
+func TestParse_SameBehaviorAsLoad(t *testing.T) {
+	setHash(t)
+	if _, err := Parse([]byte(validYAML)); err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+}
+
+func TestHash_SameBytesSameHash(t *testing.T) {
+	a := Hash([]byte("x"))
+	b := Hash([]byte("x"))
+	c := Hash([]byte("y"))
+	if a != b || a == c {
+		t.Fatalf("Hash(%q) = %q, Hash(%q) = %q; want equal hashes for equal input, different for different input", "x", a, "y", c)
+	}
+}
+
 func TestLoad_Valid(t *testing.T) {
 	setHash(t)
 	cfg, err := Load(writeTemp(t, validYAML))

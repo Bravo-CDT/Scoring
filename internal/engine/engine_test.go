@@ -959,6 +959,19 @@ func TestReload_InvalidConfigChangesNothing(t *testing.T) {
 	}
 }
 
+func TestReload_UpdatesLoadedConfigHash(t *testing.T) {
+	h := newHarness(t, okCheck, "svc1")
+	before := h.e.LoadedConfigHash()
+	h.writeConfig(t, configYAML("svc1", "svc2"))
+	if _, err := h.e.Reload(h.configPath); err != nil {
+		t.Fatalf("Reload: %v", err)
+	}
+	after := h.e.LoadedConfigHash()
+	if after == "" || after == before {
+		t.Fatalf("LoadedConfigHash did not change after a successful Reload with a changed file (before=%q, after=%q)", before, after)
+	}
+}
+
 // The app's startup sync and shutdown stop are automatic, not an admin's
 // doing, so their events must say so.
 func TestReloadAs_SystemAttributesEveryEvent(t *testing.T) {

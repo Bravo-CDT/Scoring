@@ -15,6 +15,7 @@ package engine
 import (
 	"errors"
 	"fmt"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -125,6 +126,13 @@ type Engine struct {
 	// desiredEnabled holds each service's admin-chosen routine state; a
 	// service absent from it is enabled.
 	desiredEnabled map[int64]bool
+
+	// configHashMu guards configHash, read far more often (every config
+	// editor poll) than it is written (one Reload at a time), so it stays
+	// separate from mu rather than requiring every reader to take the
+	// control-operation lock.
+	configHashMu sync.Mutex
+	configHash   string
 }
 
 // New wires a store, a session and a scheduler together. configPath is the
@@ -419,6 +427,7 @@ func (e *Engine) ReloadAs(actor Actor, configPath string) (ReloadResult, error) 
 	if err != nil {
 		return res, fmt.Errorf("engine: reloading config: %w", err)
 	}
+	e.recordLoadedConfigHash(configPath)
 	active, err := e.store.ListActiveServices(e.session.ID)
 	if err != nil {
 		return res, fmt.Errorf("engine: reloading config: %w", err)
@@ -465,6 +474,32 @@ func (e *Engine) ReloadAs(actor Actor, configPath string) (ReloadResult, error) 
 	msg := fmt.Sprintf("config reloaded: added [%s], removed [%s]",
 		strings.Join(res.Added, ", "), strings.Join(res.Removed, ", "))
 	return res, e.logEngineEvent(actor, EventConfigReloaded, msg)
+}
+
+// LoadedConfigHash returns the hash of the config file this Engine last
+// successfully loaded (at construction and on every successful Reload).
+func (e *Engine) LoadedConfigHash() string {
+	e.configHashMu.Lock()
+	defer e.configHashMu.Unlock()
+	return e.configHash
+}
+
+// recordLoadedConfigHash re-reads configPath (already known loadable, since
+// the caller just parsed it) and records its hash as the one this Engine has
+// loaded. Best effort, mirroring snapshotConfig's best-effort style: on a
+// rare failure to re-read the same file moments after loading it (e.g. it
+// was deleted in between), LoadedConfigHash simply keeps its previous value
+// until the next successful reload. Not worth an event of its own: nothing
+// scored is affected, only the config-editor's "stale" indicator for one
+// cycle.
+func (e *Engine) recordLoadedConfigHash(configPath string) {
+	raw, err := os.ReadFile(configPath)
+	if err != nil {
+		return
+	}
+	e.configHashMu.Lock()
+	e.configHash = config.Hash(raw)
+	e.configHashMu.Unlock()
 }
 
 // retire stops svc's routine and deactivates it. The caller holds mu.
