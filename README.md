@@ -40,6 +40,40 @@ engine and resume scoring (or `POST /login` then `POST /engine/start` and
 `POST /scoring/resume` directly). See `config.example.yaml` for the full
 config reference.
 
+## Checking services by hand
+
+Some checks (`ca`, `telnet` in the lab config) are scripts in `checks/` that
+shell out to tools like `impacket-rpcdump` and `expect`. Install those once
+on the scoring box:
+
+```sh
+make check-deps                      # apt-installs checks/apt-packages.txt
+```
+
+To run every configured check once and print the results, without starting
+the engine:
+
+```sh
+make check CONFIG=config.lab.yaml                      # every service
+make check CONFIG=config.lab.yaml SERVICES="iis telnet" # just these
+```
+
+This needs no `ADMIN_PASSWORD_HASH`, touches no database, and is safe to
+run alongside a running engine. Run it (and the engine) from the repo root:
+script paths in the config are relative to the working directory, and
+every script must live in `checks/` -- the engine refuses to run one from
+anywhere else.
+
+A script can also be run directly. It takes the host as its only argument
+and its settings from `CHECK_*` environment variables; exit status 0 means
+up, and the last line it prints is the public result detail:
+
+```sh
+CHECK_USER=sandy CHECK_PASSWORD='Patty321!' CHECK_EXPECT_HOSTNAME=kelpdelivery \
+  checks/telnet.exp 10.111.2.5
+checks/ca_rpc.sh 10.111.2.2
+```
+
 ## Backups
 
 The admin console has a "Back up now" button (and "Reset for a new round"
