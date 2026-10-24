@@ -129,7 +129,7 @@ func newHarnessWithSink(t *testing.T, check checks.CheckFunc, wrap func(schedule
 
 	registry := checks.NewRegistry()
 	registry.Register("tcp_connect", check)
-	var sink scheduler.ResultSink = scorer.New(st, h.sess.ID, nil)
+	var sink scheduler.ResultSink = scorer.New(st, h.sess.ID)
 	if wrap != nil {
 		sink = wrap(sink)
 	}

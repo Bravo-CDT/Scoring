@@ -20,11 +20,6 @@
 # round_interval_seconds and points_per_failure below are starting points --
 # tune them to match whatever cadence/weighting you actually want for the
 # competition.
-#
-# mass_failure_fraction is deliberately omitted (disabling the auto-pause
-# safety net): by the end of the competition red team is expected to have
-# brought most services down, and that must keep costing points rather than
-# pausing scoring.
 session_name: "krusty-krab-comp"
 starting_score: 1000
 round_interval_seconds: 30

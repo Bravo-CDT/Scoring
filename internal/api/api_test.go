@@ -131,7 +131,7 @@ func newHarness(t *testing.T, check checks.CheckFunc, services ...string) *harne
 
 	registry := checks.NewRegistry()
 	registry.Register("tcp_connect", check)
-	sched := scheduler.New(registry, scorer.New(st, h.sess.ID, nil), h.configPath, testRound)
+	sched := scheduler.New(registry, scorer.New(st, h.sess.ID), h.configPath, testRound)
 	h.e = engine.New(st, h.sess, sched, h.configPath)
 	// Registered after the store's Close, so it runs first.
 	t.Cleanup(func() { h.e.Stop() })

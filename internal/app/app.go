@@ -114,14 +114,8 @@ func build(opts Options, cfg *config.Config, st *store.Store) (*App, error) {
 	if registry == nil {
 		registry = checks.NewDefaultRegistry()
 	}
-	// The scorer and scheduler refer to each other: the scheduler reports into
-	// the scorer, and the scorer's mass-failure check counts only services the
-	// scheduler is running. The closure reads sched only once results flow,
-	// which needs the scheduler, so it is always set by then.
-	var sched *scheduler.Scheduler
-	running := func(serviceID int64) bool { return sched.IsRunning(serviceID) }
-	sc := scorer.New(st, sess.ID, cfg.MassFailureFraction, scorer.WithRunning(running))
-	sched = scheduler.New(registry, sc, opts.ConfigPath, time.Duration(cfg.RoundIntervalSeconds)*time.Second)
+	sc := scorer.New(st, sess.ID)
+	sched := scheduler.New(registry, sc, opts.ConfigPath, time.Duration(cfg.RoundIntervalSeconds)*time.Second)
 	eng := engine.New(st, sess, sched, opts.ConfigPath)
 
 	// Sync the session's services with the config through the same path as

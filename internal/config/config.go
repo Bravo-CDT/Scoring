@@ -65,13 +65,9 @@ type Config struct {
 	// service is checked once per round, all at the same instant. It is read
 	// once at startup, so changing it takes a restart; /reload does not
 	// apply it.
-	RoundIntervalSeconds int `yaml:"round_interval_seconds"`
-	// MassFailureFraction is the share of services that must fail within one
-	// scoring window to auto-pause scoring. Nil (the field omitted) disables
-	// the safety net.
-	MassFailureFraction *float64        `yaml:"mass_failure_fraction"`
-	Admin               AdminConfig     `yaml:"admin"`
-	Services            []ServiceConfig `yaml:"services"`
+	RoundIntervalSeconds int             `yaml:"round_interval_seconds"`
+	Admin                AdminConfig     `yaml:"admin"`
+	Services             []ServiceConfig `yaml:"services"`
 }
 
 // Hash returns the sha256 hex digest of raw config file bytes, used to
@@ -146,8 +142,7 @@ func Parse(raw []byte) (*Config, error) {
 func decode(expanded []byte, withAdmin bool) (*Config, error) {
 	dec := yaml.NewDecoder(bytes.NewReader(expanded))
 	// Reject unrecognized keys: a misspelled field would otherwise be silently
-	// ignored, and some of them (mass_failure_fraction above all) fail quietly
-	// by doing nothing at all.
+	// ignored, and an optional one would fail quietly by doing nothing at all.
 	dec.KnownFields(true)
 
 	var cfg Config
@@ -192,9 +187,6 @@ func validate(cfg *Config, withAdmin bool) error {
 	}
 	if cfg.RoundIntervalSeconds <= 0 {
 		return fmt.Errorf("round_interval_seconds must be a positive integer, got %d", cfg.RoundIntervalSeconds)
-	}
-	if f := cfg.MassFailureFraction; f != nil && (*f <= 0 || *f > 1) {
-		return fmt.Errorf("mass_failure_fraction must be greater than 0 and at most 1, got %v", *f)
 	}
 	if withAdmin {
 		if cfg.Admin.Username == "" {

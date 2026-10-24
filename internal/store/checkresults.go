@@ -95,9 +95,7 @@ const newestFirst = `ORDER BY timestamp DESC, id DESC`
 // it backwards).
 const lastInserted = `ORDER BY id DESC`
 
-// The per-service "latest" queries. They run on every check result (the
-// scorer's mass-failure check reads every service's latest outcome each
-// time), so each is written to be answered from idx_check_results_service —
+// The per-service "latest" queries. They run on every check result, so each is written to be answered from idx_check_results_service —
 // whose entries are (service_id, rowid), already in lastInserted order —
 // reading only the newest rows rather than sorting or scanning a service's
 // whole history. TestPerServiceLatestQueriesUseTheServiceIndex pins the plans.
@@ -113,18 +111,6 @@ const (
 		   AND id > COALESCE(
 		       (SELECT id FROM check_results WHERE service_id = ? AND success = 1
 		        ` + lastInserted + ` LIMIT 1), 0)`
-
-	// The subquery matches on service_id alone (a service belongs to exactly
-	// one session); also matching session_id would steer the planner to the
-	// (session_id, service_id, timestamp) index, which then has to sort each
-	// service's whole history by id.
-	activeServiceOutcomesSQL = `SELECT sv.id, COALESCE(
-		     (SELECT cr.success = 0 FROM check_results cr
-		      WHERE cr.service_id = sv.id
-		      ` + lastInserted + ` LIMIT 1), FALSE)
-		 FROM services sv
-		 WHERE sv.session_id = ? AND sv.active = 1
-		 ORDER BY sv.id`
 )
 
 // scanCheckResult reads one checkResultColumns row. Its error is returned
@@ -243,45 +229,6 @@ func (s *Store) CountConsecutiveFailures(serviceID int64) (int, error) {
 		return 0, fmt.Errorf("store: counting consecutive failures for service %d: %w", serviceID, err)
 	}
 	return count, nil
-}
-
-// ServiceOutcome is one active service's current state for the mass-failure
-// check: whether its most recent check result is a failure.
-type ServiceOutcome struct {
-	ServiceID int64
-	// Failing is true when the latest result (by the same insert order as
-	// GetLatestCheckResult) is a failure. A service with no result yet is
-	// not failing: "no result yet" is unknown, not down.
-	Failing bool
-}
-
-// ActiveServiceOutcomes returns the current outcome of every active service in
-// the session, in service id order. Inactive services are left out.
-//
-// Services that have not reported yet are included (as not failing), so a
-// caller dividing failures by the number of services does not mistake the
-// first failure of a competition for 100% of services down. It returns every
-// service rather than two counts so the caller can narrow the set further
-// (the scorer keeps only services whose routine is running).
-func (s *Store) ActiveServiceOutcomes(sessionID int64) ([]ServiceOutcome, error) {
-	rows, err := s.db.Query(activeServiceOutcomesSQL, sessionID)
-	if err != nil {
-		return nil, fmt.Errorf("store: listing active service outcomes in session %d: %w", sessionID, err)
-	}
-	defer rows.Close()
-
-	var out []ServiceOutcome
-	for rows.Next() {
-		var o ServiceOutcome
-		if err := rows.Scan(&o.ServiceID, &o.Failing); err != nil {
-			return nil, fmt.Errorf("store: scanning service outcome row: %w", err)
-		}
-		out = append(out, o)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("store: listing active service outcomes in session %d: %w", sessionID, err)
-	}
-	return out, nil
 }
 
 // timestampMillis is how every timestamp reaches the database: Unix

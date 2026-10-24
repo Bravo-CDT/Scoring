@@ -29,13 +29,6 @@ starting_score: 1000
 # /reload).
 round_interval_seconds: 30
 
-# Optional. If at least this fraction (0 < f <= 1) of active services are
-# failing at the same time (each one's latest check failed), all scoring is
-# paused automatically -- a safety net for an outage on the scoring side
-# rather than the blue team's. An admin must resume it. Omit to disable.
-# Read at startup only (not on /reload).
-mass_failure_fraction: 0.8
-
 admin:
   username: admin
   # A bcrypt hash, never the plain password. A dollar-brace reference like the

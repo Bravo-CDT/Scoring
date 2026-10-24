@@ -1,7 +1,6 @@
 package store
 
 import (
-	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -587,87 +586,6 @@ func lastBytes(s string, n int) string {
 	return s[len(s)-n:]
 }
 
-func TestActiveServiceOutcomes(t *testing.T) {
-	st := openTemp(t)
-	sess, err := st.GetOrCreateSession("comp-1", 1000)
-	if err != nil {
-		t.Fatalf("GetOrCreateSession: %v", err)
-	}
-	mustService := func(sessionID int64, name string) int64 {
-		t.Helper()
-		svc, err := st.GetOrCreateService(sessionID, name)
-		if err != nil {
-			t.Fatalf("GetOrCreateService(%q): %v", name, err)
-		}
-		return svc.ID
-	}
-	record := func(sessionID, serviceID int64, ts time.Time, success bool) {
-		t.Helper()
-		if _, err := st.InsertCheckResult(CheckResult{
-			SessionID: sessionID, ServiceID: serviceID, Timestamp: ts, Success: success,
-		}); err != nil {
-			t.Fatalf("InsertCheckResult: %v", err)
-		}
-	}
-
-	base := time.Date(2026, 10, 15, 12, 0, 0, 0, time.UTC)
-	svcA := mustService(sess.ID, "svc-a") // down then up: latest is up
-	svcB := mustService(sess.ID, "svc-b") // down: latest is down
-	svcC := mustService(sess.ID, "svc-c") // down but inactive: excluded entirely
-	svcD := mustService(sess.ID, "svc-d") // active, never reported: listed, not failing
-	svcE := mustService(sess.ID, "svc-e") // up, then down with an earlier timestamp: down
-	if err := st.SetServiceActive(svcC, false); err != nil {
-		t.Fatalf("SetServiceActive: %v", err)
-	}
-
-	record(sess.ID, svcA, base, false)
-	record(sess.ID, svcA, base.Add(time.Second), true)
-	record(sess.ID, svcB, base, false)
-	record(sess.ID, svcC, base, false)
-	// Inserted out of timestamp order (a backward clock step): "latest"
-	// follows insert order, as GetLatestCheckResult does, so svc-e is down.
-	record(sess.ID, svcE, base.Add(time.Second), true)
-	record(sess.ID, svcE, base, false)
-
-	// A failing service in another session must not leak into these counts.
-	other, err := st.GetOrCreateSession("comp-2", 1000)
-	if err != nil {
-		t.Fatalf("GetOrCreateSession(comp-2): %v", err)
-	}
-	record(other.ID, mustService(other.ID, "svc-x"), base, false)
-
-	got, err := st.ActiveServiceOutcomes(sess.ID)
-	if err != nil {
-		t.Fatalf("ActiveServiceOutcomes: %v", err)
-	}
-	// a, b, d, e in id order: inactive c excluded, unreported d included as
-	// not failing, svc-b and svc-e failing.
-	want := []ServiceOutcome{
-		{ServiceID: svcA, Failing: false},
-		{ServiceID: svcB, Failing: true},
-		{ServiceID: svcD, Failing: false},
-		{ServiceID: svcE, Failing: true},
-	}
-	if !slices.Equal(got, want) {
-		t.Errorf("ActiveServiceOutcomes = %+v, want %+v", got, want)
-	}
-}
-
-func TestActiveServiceOutcomes_NoServices(t *testing.T) {
-	st := openTemp(t)
-	sess, err := st.GetOrCreateSession("comp-1", 1000)
-	if err != nil {
-		t.Fatalf("GetOrCreateSession: %v", err)
-	}
-	got, err := st.ActiveServiceOutcomes(sess.ID)
-	if err != nil {
-		t.Fatalf("ActiveServiceOutcomes: %v", err)
-	}
-	if len(got) != 0 {
-		t.Errorf("ActiveServiceOutcomes = %+v, want none", got)
-	}
-}
-
 func TestCountConsecutiveFailures(t *testing.T) {
 	base := time.Date(2026, 10, 15, 12, 0, 0, 0, time.UTC)
 	tests := []struct {
@@ -765,31 +683,21 @@ func explainPlan(t *testing.T, st *Store, query string, args ...any) []planStep 
 	return plan
 }
 
-// The per-service "latest" queries run on every check result (the scorer's
-// mass-failure check reads every service's latest outcome each time), so
-// their cost must not grow with the length of the history. This pins it
-// without timing anything: every read of check_results must be an index
-// SEARCH on the service id, and no sort may run over check_results rows
-// (the only sort allowed is the outcomes query's top-level ordering of the
-// handful of service rows).
+// The per-service "latest" queries run on every check result, so their cost
+// must not grow with the length of the history. This pins it without timing
+// anything: every read of check_results must be an index SEARCH on the
+// service id, and no sort may run anywhere in the plan (a sort would mean
+// check_results rows are being sorted instead of answered straight from the
+// index).
 func TestPerServiceLatestQueriesUseTheServiceIndex(t *testing.T) {
 	st := openTemp(t)
 	tests := []struct {
 		name  string
 		query string
 		args  []any
-		// allowTopLevelSort is true only for the one query (ActiveServiceOutcomes)
-		// whose plan legitimately sorts a handful of per-service result rows at
-		// the top level. GetLatestCheckResult and CountConsecutiveFailures query
-		// a single service directly and must need no sort anywhere in their
-		// plan — a top-level sort there would mean check_results rows
-		// themselves are being sorted instead of answered straight from the
-		// index, which is exactly the regression this test exists to catch.
-		allowTopLevelSort bool
 	}{
-		{"GetLatestCheckResult", latestCheckResultSQL, []any{1}, false},
-		{"CountConsecutiveFailures", consecutiveFailuresSQL, []any{1, 1}, false},
-		{"ActiveServiceOutcomes", activeServiceOutcomesSQL, []any{1}, true},
+		{"GetLatestCheckResult", latestCheckResultSQL, []any{1}},
+		{"CountConsecutiveFailures", consecutiveFailuresSQL, []any{1, 1}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -804,11 +712,7 @@ func TestPerServiceLatestQueriesUseTheServiceIndex(t *testing.T) {
 					}
 				}
 				if strings.Contains(s.detail, "TEMP B-TREE") {
-					isSubquerySort := s.parent != 0
-					isDisallowedTopLevelSort := s.parent == 0 && !tt.allowTopLevelSort
-					if isSubquerySort || isDisallowedTopLevelSort {
-						t.Errorf("unexpected sort: %q (plan %+v)", s.detail, plan)
-					}
+					t.Errorf("unexpected sort: %q (plan %+v)", s.detail, plan)
 				}
 			}
 			if !sawCheckResults {

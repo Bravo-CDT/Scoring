@@ -32,7 +32,6 @@ const validYAML = `
 session_name: "test-session"
 starting_score: 1000
 round_interval_seconds: 30
-mass_failure_fraction: 0.5
 
 admin:
   username: admin
@@ -57,7 +56,7 @@ services:
       port: 23
 `
 
-// minimalYAML is the smallest valid config: no mass_failure_fraction, one
+// minimalYAML is the smallest valid config: one
 // service with only its required param.
 const minimalYAML = `
 session_name: "minimal"
@@ -123,12 +122,6 @@ func TestLoad_Valid(t *testing.T) {
 	}
 	if cfg.RoundIntervalSeconds != 30 {
 		t.Errorf("RoundIntervalSeconds = %d, want 30", cfg.RoundIntervalSeconds)
-	}
-	if cfg.MassFailureFraction == nil {
-		t.Fatal("MassFailureFraction = nil, want 0.5")
-	}
-	if *cfg.MassFailureFraction != 0.5 {
-		t.Errorf("MassFailureFraction = %v, want 0.5", *cfg.MassFailureFraction)
 	}
 	if cfg.Admin.Username != "admin" {
 		t.Errorf("Admin.Username = %q, want admin", cfg.Admin.Username)
@@ -201,9 +194,6 @@ func TestLoad_MinimalConfig(t *testing.T) {
 	cfg, err := Load(writeTemp(t, minimalYAML))
 	if err != nil {
 		t.Fatalf("Load returned error: %v", err)
-	}
-	if cfg.MassFailureFraction != nil {
-		t.Errorf("MassFailureFraction = %v, want nil when mass_failure_fraction is omitted", *cfg.MassFailureFraction)
 	}
 	if port, _ := cfg.Services[0].Params["port"].(int); port != 22 || len(cfg.Services[0].Params) != 1 {
 		t.Errorf("Params = %v, want just port 22", cfg.Services[0].Params)
@@ -359,12 +349,12 @@ func TestLoad_InvalidConfigs(t *testing.T) {
 			wantErr: "yaml",
 		},
 		{
-			name: "unknown top-level field",
+			name: "unknown top-level field (the removed mass_failure_fraction too)",
 			yaml: `
 session_name: "s"
 starting_score: 1000
 round_interval_seconds: 60
-mass_failure_fracton: 0.5
+mass_failure_fraction: 0.8
 admin:
   username: admin
   password_hash: ${TEST_ADMIN_HASH}
@@ -374,7 +364,7 @@ services:
     check_type: http
     points_per_failure: 10
 `,
-			wantErr: "mass_failure_fracton",
+			wantErr: "mass_failure_fraction",
 		},
 		{
 			// Strictness is recursive: a typo inside a service entry is
@@ -416,16 +406,6 @@ services:
 			name:    "negative starting_score",
 			yaml:    strings.Replace(minimalYAML, "starting_score: 500", "starting_score: -1", 1),
 			wantErr: "starting_score",
-		},
-		{
-			name:    "mass_failure_fraction zero",
-			yaml:    strings.Replace(validYAML, "mass_failure_fraction: 0.5", "mass_failure_fraction: 0", 1),
-			wantErr: "mass_failure_fraction",
-		},
-		{
-			name:    "mass_failure_fraction above one",
-			yaml:    strings.Replace(validYAML, "mass_failure_fraction: 0.5", "mass_failure_fraction: 1.5", 1),
-			wantErr: "mass_failure_fraction",
 		},
 		{
 			name:    "missing admin username",

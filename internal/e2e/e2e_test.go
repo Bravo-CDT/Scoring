@@ -484,67 +484,6 @@ func countEvents(events []map[string]any, eventType string) int {
 	return n
 }
 
-// TestEndToEnd_MassFailureIgnoresStoppedRoutines checks that app wires the
-// scheduler's running state into the scorer: a routine an admin stopped while
-// it was failing must drop out of the mass-failure share, rather than keep
-// counting its stale failure for the rest of the competition.
-func TestEndToEnd_MassFailureIgnoresStoppedRoutines(t *testing.T) {
-	setAdminHash(t)
-	dir := t.TempDir()
-	configPath := filepath.Join(dir, "config.yaml")
-	// tcp_connect fails on port 9 and passes on any other, so a service's
-	// outcome is set by its config entry.
-	r := checks.NewRegistry()
-	r.Register("tcp_connect", func(_ context.Context, _ string, params map[string]any) checks.Result {
-		if params["port"] == 9 {
-			return checks.Result{Success: false, Detail: failDetail}
-		}
-		return checks.Result{Success: true, Detail: "ok"}
-	})
-	writePorts := func(ports map[string]int) {
-		t.Helper()
-		var b strings.Builder
-		fmt.Fprintf(&b, "session_name: e2e-comp\nstarting_score: %d\nround_interval_seconds: 1\nmass_failure_fraction: 0.5\n", startingScore)
-		fmt.Fprintf(&b, "admin:\n  username: %s\n  password_hash: ${%s}\nservices:\n", adminUser, hashEnvVar)
-		for _, name := range []string{"down", "up1", "up2", "up3"} {
-			fmt.Fprintf(&b, "  - name: %s\n    host: 127.0.0.1\n    check_type: tcp_connect\n"+
-				"    points_per_failure: %d\n    params: {port: %d}\n", name, pointsPerFailure, ports[name])
-		}
-		if err := os.WriteFile(configPath, []byte(b.String()), 0o600); err != nil {
-			t.Fatalf("writing config: %v", err)
-		}
-	}
-	writePorts(map[string]int{"down": 9, "up1": 10, "up2": 10, "up3": 10})
-
-	s := newStackWithRegistry(t, filepath.Join(dir, "scoring.db"), configPath, r)
-	token := s.login()
-	s.admin(token, "/engine/start")
-	s.admin(token, "/scoring/resume")
-	for _, name := range []string{"down", "up1", "up2", "up3"} {
-		s.awaitNewResults(name, 1) // 1 of 4 failing arms the safety net
-	}
-	if s.status().ScoringPaused {
-		t.Fatal("autopaused at 1 of 4 failing with threshold 0.5")
-	}
-
-	// Stop the failing routine, then make up1 fail. Counting only running
-	// routines that is 1 of 3; counting the stopped one's stale failure too
-	// it would be 2 of 4, which meets the threshold and would autopause.
-	s.admin(token, "/services/down/stop")
-	writePorts(map[string]int{"down": 9, "up1": 9, "up2": 10, "up3": 10})
-	s.admin(token, "/services/up1/restart")
-	s.awaitNewResults("up1", 3)
-
-	if s.status().ScoringPaused {
-		t.Fatal("autopaused: the stopped routine's stale failure was counted")
-	}
-	var events []map[string]any
-	s.do(http.MethodGet, "/events?limit=500", "", nil, &events)
-	if hasEvent(events, "mass_failure_autopause") {
-		t.Fatalf("mass_failure_autopause logged although only 1 of 3 running services is failing: %v", events)
-	}
-}
-
 // storedResults returns a service's whole check history straight from the
 // store, newest first, with the round numbers the API does not show.
 func (s *stack) storedResults(name string) []store.CheckResult {
