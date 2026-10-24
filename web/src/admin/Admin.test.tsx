@@ -128,7 +128,9 @@ describe('Admin', () => {
 
     expect(await screen.findByText('Stop engine: done')).toBeInTheDocument();
     expect(adminRequests(fetchMock)).toEqual(['POST /engine/stop']);
-    expect(new Headers(fetchMock.mock.calls.at(-1)?.[1]?.headers).get('Authorization')).toBe('Bearer tok');
+    // Find the stop request itself: a background poll can land after it.
+    const stopCall = fetchMock.mock.calls.find(([input, init]) => init?.method === 'POST' && String(input) === '/engine/stop');
+    expect(new Headers(stopCall?.[1]?.headers).get('Authorization')).toBe('Bearer tok');
     // The action's answer shows at once: the engine is stopped.
     expect(screen.getByRole('button', { name: 'Start engine' })).toBeInTheDocument();
   });

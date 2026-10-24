@@ -10,15 +10,17 @@
 # restart; log in again.
 #
 # Unknown keys are rejected, so a typo fails at startup instead of being
-# silently ignored. Edits take effect via POST /reload (adds/removes services)
-# or POST /services/<name>/restart (re-reads that service's entry).
+# silently ignored. Edits take effect via POST /reload (adds and removes
+# services, restarts running services whose entry changed, and applies a new
+# starting_score) or POST /services/<name>/restart (re-reads that service's
+# entry).
 
 # Identifies the competition. Restarting with the same name continues the same
 # scores and history; a new name starts a fresh session in the same database.
 session_name: "example-comp"
 
-# Blue team's starting points. Only used when the session is first created;
-# changing it later has no effect on an existing session.
+# Blue team's starting points. Changing it and reloading moves blue's score by
+# the difference; point history is kept.
 starting_score: 1000
 
 # Length of one scoring round, in seconds (a positive integer). Every running
