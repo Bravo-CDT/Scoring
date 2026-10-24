@@ -15,7 +15,7 @@
 # send) out of our own stdout, so nothing sensitive can reach the Detail.
 
 log_user 0
-set timeout 10
+set timeout 7
 
 # fail prints one line and exits non-zero (a "down" with a public reason).
 proc fail {msg} {
@@ -56,7 +56,12 @@ if {[info exists env(CHECK_EXPECT_HOSTNAME)]} {
 # and the remote shell has no reason to emit fancy terminal sequences.
 set env(TERM) dumb
 
-spawn telnet $host $port
+if {[auto_execok telnet] eq ""} {
+	fail "telnet client not installed (run make check-deps)"
+}
+
+# "--" ends telnet's options, so a host can never be read as one.
+spawn telnet -- $host $port
 
 expect {
 	"login:" { send "$user\r" }

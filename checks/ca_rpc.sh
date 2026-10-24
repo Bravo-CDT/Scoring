@@ -19,6 +19,8 @@ if [ -z "$host" ]; then
 	exit 1
 fi
 
+command -v impacket-rpcdump >/dev/null || { echo "impacket-rpcdump not installed (run make check-deps)"; exit 1; }
+
 # -Protocol:/UUID lines are what rpcdump prints per registered endpoint;
 # capture both streams so a failure message can't reach the Detail line,
 # and so success/failure is decided from the output, not just the status.

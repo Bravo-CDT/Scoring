@@ -3,7 +3,9 @@ package checks
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -56,11 +58,20 @@ const (
 // script's environment is only PATH and HOME, copied from the engine's, plus
 // env; nothing else of the engine's environment (ADMIN_PASSWORD_HASH, say)
 // reaches it. The script runs in its own process group, and when ctx is done
-// the whole group is killed, so children it spawned (expect's telnet, say)
-// die with it.
+// the whole group is killed, so children it spawned that stay in that group
+// die with it. Children that start their own session escape the kill:
+// expect's spawn calls setsid(), so telnet under telnet.exp runs in its own
+// session and process group. Killing expect closes the pty master, and
+// telnet should then die of the SIGHUP the kernel sends it as a result.
+//
+// A host starting with "-" is rejected, so that no tool a script hands it to
+// can read it as an option.
 func Script(ctx context.Context, host string, params map[string]any) Result {
 	if err := checkHost(host); err != nil {
 		return fail("%v", err)
+	}
+	if strings.HasPrefix(host, "-") {
+		return fail("%s", `host must not start with "-"`)
 	}
 	p, err := parseScriptParams(params)
 	if err != nil {
@@ -88,6 +99,10 @@ func Script(ctx context.Context, host string, params map[string]any) Result {
 	last := lastLine(out.Bytes())
 	state := cmd.ProcessState
 	switch {
+	case state == nil && errors.Is(err, fs.ErrNotExist) && fileExists(p.path):
+		// The script is there, so what exec could not find is the
+		// interpreter its #! line names.
+		return fail("running %s: interpreter not found (run make check-deps)", p.rel)
 	case state == nil:
 		return fail("running %s: %v", p.rel, err)
 	case ctx.Err() != nil && !state.Success():
@@ -107,6 +122,12 @@ func Script(ctx context.Context, host string, params map[string]any) Result {
 	default:
 		return fail("script ended: %s", state)
 	}
+}
+
+// fileExists reports whether path names an existing file.
+func fileExists(path string) bool {
+	_, err := os.Stat(path)
+	return err == nil
 }
 
 // lastLine returns the last non-empty line of out, trimmed, made valid UTF-8

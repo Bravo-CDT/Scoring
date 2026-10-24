@@ -190,3 +190,27 @@ func TestScript_Deleted(t *testing.T) {
 		t.Errorf("result = %+v, want failure naming the missing script", res)
 	}
 }
+
+func TestScript_MissingInterpreter(t *testing.T) {
+	path := filepath.Join(useScriptDir(t), "interp.sh")
+	if err := os.WriteFile(path, []byte("#!/nonexistent/interp\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	res := Script(context.Background(), "10.1.2.3", map[string]any{"script": path})
+	if res.Success || !strings.Contains(res.Detail, "interpreter not found") {
+		t.Errorf("result = %+v, want failure mentioning the missing interpreter", res)
+	}
+}
+
+func TestScript_RejectsOptionLikeHost(t *testing.T) {
+	dir := useScriptDir(t)
+	ran := filepath.Join(dir, "ran")
+	path := writeScript(t, dir, "ok.sh", "touch "+ran)
+	res := Script(context.Background(), "-n/tmp/scoring.db", map[string]any{"script": path})
+	if res.Success || res.Detail != `host must not start with "-"` {
+		t.Errorf("result = %+v, want failure %q", res, `host must not start with "-"`)
+	}
+	if _, err := os.Stat(ran); err == nil {
+		t.Error("the script ran despite the option-like host")
+	}
+}

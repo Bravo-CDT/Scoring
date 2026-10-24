@@ -131,8 +131,8 @@ admin:
 #                sAMAccountName that must exist).
 #   openfire     logs in to an Openfire admin console over plain HTTP (fetch
 #                login.jsp for its CSRF cookie, then POST the login form);
-#                succeeds if the login redirects anywhere but back to
-#                login.jsp.
+#                succeeds if the login POST answers 302 with a Location
+#                other than login.jsp.
 #                params: port (required, integer 1-65535, 9090 for
 #                Openfire), user (required string), password (required
 #                string).
