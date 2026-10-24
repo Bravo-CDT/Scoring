@@ -48,6 +48,10 @@ var builtins = map[string]builtin{
 		check:    HTTPExclusive,
 		validate: func(p map[string]any) error { _, err := parseHTTPExclusiveParams(p); return err },
 	},
+	"ldap": {
+		check:    LDAP,
+		validate: func(p map[string]any) error { _, err := parseLDAPParams(p); return err },
+	},
 	"postgres": {
 		check:    Postgres,
 		validate: func(p map[string]any) error { _, err := parsePostgresParams(p); return err },
