@@ -79,7 +79,7 @@ checks/ca_rpc.sh 10.111.2.2
 The admin console has a "Back up now" button (and "Reset for a new round"
 takes one by default too), both requiring the engine stopped first. Each
 backup is a complete snapshot written to a `backups/` directory next to the
-database file (e.g. `backups/scoring-20261022T190000Z.db` next to
+database file (e.g. `backups/scoring-20261022T190000.123Z.db` next to
 `scoring.db`), safe to copy elsewhere at any time.
 
 There is no restore button; restoring one is a manual, three-step process:

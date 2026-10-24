@@ -232,7 +232,7 @@ func (s *Store) Close() error {
 
 // Backup writes a complete, transactionally-consistent snapshot of the
 // database to a new file in a "backups" directory next to the database file
-// (created if missing), named "<db base name>-<UTC timestamp>.db". It uses
+// (created if missing), named "<db base name>-<UTC timestamp to the millisecond>.db". It uses
 // SQLite's VACUUM INTO, which produces a correct snapshot regardless of the
 // WAL's state -- unlike copying the .db/-wal/-shm files directly, which
 // could capture an inconsistent mid-checkpoint state. Returns the backup
@@ -243,7 +243,7 @@ func (s *Store) Backup() (string, error) {
 		return "", fmt.Errorf("store: creating backups directory %s: %w", dir, err)
 	}
 	base := strings.TrimSuffix(filepath.Base(s.path), filepath.Ext(s.path))
-	name := fmt.Sprintf("%s-%s.db", base, time.Now().UTC().Format("20060102T150405Z"))
+	name := fmt.Sprintf("%s-%s.db", base, time.Now().UTC().Format("20060102T150405.000Z"))
 	dest := filepath.Join(dir, name)
 	if _, err := s.db.Exec(`VACUUM INTO ?`, dest); err != nil {
 		return "", fmt.Errorf("store: backing up to %s: %w", dest, err)

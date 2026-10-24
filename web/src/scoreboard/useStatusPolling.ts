@@ -48,9 +48,9 @@ function burstWindowMs(roundLengthMs: number): number {
  * A `next_round_at` that is not in the future (and outside the burst
  * window) gives no usable prediction, and falls back to a fixed 5s rather
  * than a zero or negative delay that would poll in a tight loop. That
- * covers Go's zero time (0001-01-01T00:00:00Z, before the engine's first
- * round) and a stale past value (nothing enabled, or a slow check that made
- * a round land later than predicted) — both deliberate backend behaviors.
+ * covers Go's zero time (0001-01-01T00:00:00Z, before the round loop's first
+ * tick) and a stale past value (a slow check that made a round land later
+ * than predicted).
  */
 export function nextPollDelayMs(nextRoundAt: string, now: Date, roundLengthMs = MAX_DELAY_MS): number {
   const untilRound = Date.parse(nextRoundAt) - now.getTime();
