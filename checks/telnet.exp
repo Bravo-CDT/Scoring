@@ -52,6 +52,10 @@ if {[info exists env(CHECK_EXPECT_HOSTNAME)]} {
 	set expect_hostname ""
 }
 
+# The engine passes no TERM; pin it so hand runs behave like engine runs
+# and the remote shell has no reason to emit fancy terminal sequences.
+set env(TERM) dumb
+
 spawn telnet $host $port
 
 expect {
@@ -76,37 +80,23 @@ expect {
 	eof { fail "connection closed before the shell prompt" }
 }
 
-send "hostname;whoami\r"
+# Print both values on one marked line and pick them out with a regexp, so
+# echoed input, prompts and any terminal control sequences around them
+# (e.g. bracketed-paste "\e[?2004l\r") can't break the parse. The echoed
+# command has "$(" after each marker, which the value class can't match.
+send "echo H=\$(hostname) U=\$(whoami)\r"
 expect {
 	-re {\$ $} { }
-	timeout { fail "timed out waiting for the output of hostname;whoami" }
-	eof { fail "connection closed before the output of hostname;whoami" }
+	timeout { fail "timed out waiting for the output of hostname/whoami" }
+	eof { fail "connection closed before the output of hostname/whoami" }
 }
 set output $expect_out(buffer)
 
 send "exit\r"
 
-# The captured buffer holds the echoed command, the two output lines, a
-# blank line, and the next prompt, each ending in \r\n. Strip the \r, drop
-# blanks, the echoed command, the "user@host /" prompt line, the "$" line,
-# and any "-bash:" missing-tool noise; what remains is hostname then whoami.
-set lines {}
-foreach line [split $output "\n"] {
-	set line [string trim $line "\r"]
-	set line [string trim $line]
-	if {$line eq ""} { continue }
-	if {[string match "*hostname;whoami*" $line]} { continue }
-	if {[string match "*@*" $line]} { continue }
-	if {[string match {$*} $line]} { continue }
-	if {[string match "-bash:*" $line]} { continue }
-	lappend lines $line
+if {![regexp {H=([A-Za-z0-9._-]+) U=([A-Za-z0-9._-]+)} $output -> got_hostname got_whoami]} {
+	fail "could not read hostname/whoami output"
 }
-
-if {[llength $lines] < 2} {
-	fail "could not read hostname and whoami from the shell"
-}
-set got_hostname [lindex $lines 0]
-set got_whoami [lindex $lines 1]
 
 if {$got_whoami ne $user} {
 	fail "whoami returned $got_whoami, expected $user"
