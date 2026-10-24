@@ -32,6 +32,10 @@ type builtin struct {
 
 // builtins maps each shipped check type name to its plugin.
 var builtins = map[string]builtin{
+	"dns": {
+		check:    DNS,
+		validate: func(p map[string]any) error { _, err := parseDNSParams(p); return err },
+	},
 	"tcp_connect": {
 		check:    TCPConnect,
 		validate: func(p map[string]any) error { _, err := parseTCPConnectParams(p); return err },
@@ -127,8 +131,8 @@ func (r *Registry) Get(name string) (CheckFunc, bool) {
 	return fn, ok
 }
 
-// NewDefaultRegistry returns a Registry with the built-in checks
-// (tcp_connect and http) already registered.
+// NewDefaultRegistry returns a Registry with every built-in check (see
+// builtins) already registered.
 func NewDefaultRegistry() *Registry {
 	r := NewRegistry()
 	for name, b := range builtins {
