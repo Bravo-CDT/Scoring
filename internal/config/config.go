@@ -5,15 +5,18 @@
 // Loading is cheap and side-effect free, so callers re-read the file whenever
 // they need current values: the engine validates the whole file at startup (it
 // must not run on an invalid config) and later re-reads a single service entry
-// with LoadService when a routine restarts or /reload diffs the file.
+// with LoadService when a service is (re)started or /reload diffs the file.
 //
 // Any ${VAR} in the file is replaced with that environment variable's value
 // before parsing, which is how secrets such as the admin bcrypt hash stay out
-// of the file. A missing variable is an error rather than an empty string.
+// of the file. A missing variable is an error rather than an empty string
+// (except under LoadForChecks, which only reports it).
 package config
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"os"
@@ -37,12 +40,12 @@ var ErrServiceNotFound = errors.New("config: service not found")
 // typo'd check_type fails at startup instead of at the first tick.
 func knownCheckTypes() []string { return checks.BuiltinTypes() }
 
-// ServiceConfig is one scored service.
+// ServiceConfig is one scored service. It has no interval of its own: every
+// service is checked once per shared round (Config.RoundIntervalSeconds).
 type ServiceConfig struct {
 	Name             string         `yaml:"name"`
 	Host             string         `yaml:"host"`
 	CheckType        string         `yaml:"check_type"`
-	IntervalSeconds  int            `yaml:"interval_seconds"`
 	PointsPerFailure int            `yaml:"points_per_failure"`
 	Params           map[string]any `yaml:"params"`
 }
@@ -58,12 +61,20 @@ type AdminConfig struct {
 type Config struct {
 	SessionName   string `yaml:"session_name"`
 	StartingScore int    `yaml:"starting_score"`
-	// MassFailureFraction is the share of services that must fail within one
-	// scoring window to auto-pause scoring. Nil (the field omitted) disables
-	// the safety net.
-	MassFailureFraction *float64        `yaml:"mass_failure_fraction"`
-	Admin               AdminConfig     `yaml:"admin"`
-	Services            []ServiceConfig `yaml:"services"`
+	// RoundIntervalSeconds is the length of one scoring round: every enabled
+	// service is checked once per round, all at the same instant. It is read
+	// once at startup, so changing it takes a restart; /reload does not
+	// apply it.
+	RoundIntervalSeconds int             `yaml:"round_interval_seconds"`
+	Admin                AdminConfig     `yaml:"admin"`
+	Services             []ServiceConfig `yaml:"services"`
+}
+
+// Hash returns the sha256 hex digest of raw config file bytes, used to
+// detect whether the file on disk has changed since it was last loaded.
+func Hash(raw []byte) string {
+	sum := sha256.Sum256(raw)
+	return hex.EncodeToString(sum[:])
 }
 
 // Load reads, expands, parses, and validates the config file at path.
@@ -72,7 +83,7 @@ func Load(path string) (*Config, error) {
 	if err != nil {
 		return nil, fmt.Errorf("config: reading %s: %w", path, err)
 	}
-	cfg, err := parse(raw)
+	cfg, err := Parse(raw)
 	if err != nil {
 		return nil, fmt.Errorf("config: %s: %w", path, err)
 	}
@@ -96,23 +107,49 @@ func LoadService(path, name string) (*ServiceConfig, error) {
 	return nil, fmt.Errorf("%w: %s", ErrServiceNotFound, name)
 }
 
-func parse(raw []byte) (*Config, error) {
-	expanded, err := expandEnv(raw)
+// LoadForChecks loads path for running checks by hand (scoringengine check),
+// which needs only the services. Unlike Load, an unset ${VAR} is left in
+// place as literal text and reported in unsetVars rather than failing, and the
+// admin section is not validated, so the scoring box need not hold the admin
+// hash just to run checks. Everything else, services included, is validated
+// exactly as Load validates it.
+func LoadForChecks(path string) (cfg *Config, unsetVars []string, err error) {
+	raw, err := os.ReadFile(path)
 	if err != nil {
-		return nil, err
+		return nil, nil, fmt.Errorf("config: reading %s: %w", path, err)
 	}
+	expanded, unsetVars := expandEnv(raw)
+	cfg, err = decode(expanded, false)
+	if err != nil {
+		return nil, nil, fmt.Errorf("config: %s: %w", path, err)
+	}
+	return cfg, unsetVars, nil
+}
 
+// Parse expands, parses, and validates raw config file bytes. Load is
+// os.ReadFile plus Parse; callers that already have the bytes in hand (an
+// admin's config-editor save, say) call Parse directly.
+func Parse(raw []byte) (*Config, error) {
+	expanded, missing := expandEnv(raw)
+	if len(missing) > 0 {
+		return nil, fmt.Errorf("environment variable(s) not set: %v", missing)
+	}
+	return decode(expanded, true)
+}
+
+// decode parses and validates expanded config bytes, validating the admin
+// section only if withAdmin is set.
+func decode(expanded []byte, withAdmin bool) (*Config, error) {
 	dec := yaml.NewDecoder(bytes.NewReader(expanded))
 	// Reject unrecognized keys: a misspelled field would otherwise be silently
-	// ignored, and some of them (mass_failure_fraction above all) fail quietly
-	// by doing nothing at all.
+	// ignored, and an optional one would fail quietly by doing nothing at all.
 	dec.KnownFields(true)
 
 	var cfg Config
 	if err := dec.Decode(&cfg); err != nil {
 		return nil, fmt.Errorf("parsing yaml: %w", err)
 	}
-	if err := validate(&cfg); err != nil {
+	if err := validate(&cfg, withAdmin); err != nil {
 		return nil, err
 	}
 	normalize(&cfg)
@@ -122,11 +159,11 @@ func parse(raw []byte) (*Config, error) {
 var envVarPattern = regexp.MustCompile(`\$\{([A-Za-z_][A-Za-z0-9_]*)\}`)
 
 // expandEnv replaces every ${VAR} reference with that environment variable's
-// value, reporting all unset variables at once so a misconfigured deployment
-// needs one fix-and-retry cycle rather than one per secret.
-func expandEnv(raw []byte) ([]byte, error) {
-	var missing []string
-	expanded := envVarPattern.ReplaceAllFunc(raw, func(match []byte) []byte {
+// value. An unset variable's reference is left as is, and all of them are
+// returned at once so a misconfigured deployment needs one fix-and-retry cycle
+// rather than one per secret.
+func expandEnv(raw []byte) (expanded []byte, missing []string) {
+	expanded = envVarPattern.ReplaceAllFunc(raw, func(match []byte) []byte {
 		name := string(envVarPattern.FindSubmatch(match)[1])
 		val, ok := os.LookupEnv(name)
 		if !ok {
@@ -137,32 +174,37 @@ func expandEnv(raw []byte) ([]byte, error) {
 		}
 		return []byte(val)
 	})
-	if len(missing) > 0 {
-		return nil, fmt.Errorf("environment variable(s) not set: %v", missing)
-	}
-	return expanded, nil
+	return expanded, missing
 }
 
-func validate(cfg *Config) error {
+// validate checks cfg, including its admin section only if withAdmin is set.
+func validate(cfg *Config, withAdmin bool) error {
 	if cfg.SessionName == "" {
 		return errors.New("session_name is required")
 	}
 	if cfg.StartingScore <= 0 {
 		return fmt.Errorf("starting_score must be a positive integer, got %d", cfg.StartingScore)
 	}
-	if f := cfg.MassFailureFraction; f != nil && (*f <= 0 || *f > 1) {
-		return fmt.Errorf("mass_failure_fraction must be greater than 0 and at most 1, got %v", *f)
+	if cfg.RoundIntervalSeconds <= 0 {
+		return fmt.Errorf("round_interval_seconds must be a positive integer, got %d", cfg.RoundIntervalSeconds)
 	}
-	if cfg.Admin.Username == "" {
-		return errors.New("admin.username is required")
+	if withAdmin {
+		if cfg.Admin.Username == "" {
+			return errors.New("admin.username is required")
+		}
+		if _, err := bcrypt.Cost([]byte(cfg.Admin.PasswordHash)); err != nil {
+			// Fail now rather than silently rejecting every login later.
+			return fmt.Errorf("admin.password_hash is not a valid bcrypt hash: %w", err)
+		}
 	}
-	if _, err := bcrypt.Cost([]byte(cfg.Admin.PasswordHash)); err != nil {
-		// Fail now rather than silently rejecting every login later.
-		return fmt.Errorf("admin.password_hash is not a valid bcrypt hash: %w", err)
-	}
+	return validateServices(cfg.Services)
+}
 
-	seen := make(map[string]struct{}, len(cfg.Services))
-	for i, svc := range cfg.Services {
+// validateServices checks every service entry: unique names, a host, a known
+// check type whose params that check accepts, and a positive penalty.
+func validateServices(services []ServiceConfig) error {
+	seen := make(map[string]struct{}, len(services))
+	for i, svc := range services {
 		if svc.Name == "" {
 			return fmt.Errorf("services[%d].name is required", i)
 		}
@@ -182,9 +224,6 @@ func validate(cfg *Config) error {
 		// reject at every tick is refused here instead.
 		if err := checks.ValidateParams(svc.CheckType, svc.Params); err != nil {
 			return fmt.Errorf("service %q: params: %w", svc.Name, err)
-		}
-		if svc.IntervalSeconds <= 0 {
-			return fmt.Errorf("service %q: interval_seconds must be a positive integer, got %d", svc.Name, svc.IntervalSeconds)
 		}
 		if svc.PointsPerFailure <= 0 {
 			return fmt.Errorf("service %q: points_per_failure must be a positive integer, got %d", svc.Name, svc.PointsPerFailure)

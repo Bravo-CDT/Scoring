@@ -2,9 +2,12 @@ package api
 
 import (
 	"errors"
+	"fmt"
 	"net/http"
+	"time"
 
 	"github.com/Bravo-CDT/Scoring/internal/engine"
+	"github.com/Bravo-CDT/Scoring/internal/store"
 )
 
 type loginRequest struct {
@@ -160,12 +163,42 @@ func (s *server) statusAfterAction(w http.ResponseWriter, r *http.Request) (engi
 	return status, true
 }
 
+type countdownRequest struct {
+	// Target is an RFC 3339 timestamp, or null to clear the countdown.
+	Target *string `json:"target"`
+}
+
+// handleCountdown serves POST /countdown with a {"target": "<RFC 3339>" | null}
+// body, setting or clearing the time the scoreboard's countdown runs to, and
+// answers with the current status.
+func (s *server) handleCountdown(w http.ResponseWriter, r *http.Request) {
+	var req countdownRequest
+	if err := decodeJSON(w, r, &req); err != nil {
+		writeBodyError(w, err)
+		return
+	}
+	var target *time.Time
+	if req.Target != nil {
+		t, err := time.Parse(time.RFC3339, *req.Target)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "target must be an RFC 3339 timestamp or null")
+			return
+		}
+		target = &t
+	}
+	if err := s.engine.SetCountdownTarget(target); err != nil {
+		s.adminError(w, r, err)
+		return
+	}
+	s.writeCurrentStatus(w, r)
+}
+
 type reloadResponse struct {
 	engine.ReloadResult
 	Error string `json:"error,omitempty"`
 }
 
-// handleReload serves POST /reload: {"added", "removed", "failed"}. An added
+// handleReload serves POST /reload: {"added", "removed", "updated", "failed"}. An added
 // service whose routine fails to start is still added, so that is a 200 with
 // the failure in "failed". A reload that fails as a whole (an invalid file, a
 // store error) is a 500 whose body carries, beside the error, whatever
@@ -180,4 +213,111 @@ func (s *server) handleReload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, resp)
+}
+
+// writeConflict answers a precondition failure (scoring not paused, engine
+// not stopped) with 409 and the error's message.
+func (s *server) writeConflict(w http.ResponseWriter, err error) {
+	writeError(w, http.StatusConflict, err.Error())
+}
+
+type adjustScoreRequest struct {
+	Points int    `json:"points"`
+	Reason string `json:"reason"`
+}
+
+// handleAdjustScore serves POST /teams/{side}/adjust: a 400 for an unknown
+// side or zero points, a 409 if scoring is not paused, otherwise the
+// current status.
+func (s *server) handleAdjustScore(w http.ResponseWriter, r *http.Request) {
+	side := r.PathValue("side")
+	if side != store.SideBlue && side != store.SideRed {
+		writeError(w, http.StatusBadRequest, `side must be "blue" or "red"`)
+		return
+	}
+	var req adjustScoreRequest
+	if err := decodeJSON(w, r, &req); err != nil {
+		writeBodyError(w, err)
+		return
+	}
+	if req.Points == 0 {
+		writeError(w, http.StatusBadRequest, "points must not be zero")
+		return
+	}
+	if req.Points > engine.MaxAdjustmentPoints || req.Points < -engine.MaxAdjustmentPoints {
+		writeError(w, http.StatusBadRequest, fmt.Sprintf("points must be within +/-%d", engine.MaxAdjustmentPoints))
+		return
+	}
+
+	if err := s.engine.AdjustScore(side, req.Points, req.Reason); err != nil {
+		switch {
+		case errors.Is(err, engine.ErrScoringNotPaused):
+			s.writeConflict(w, err)
+		case errors.Is(err, engine.ErrInvalidAdjustment):
+			writeError(w, http.StatusBadRequest, err.Error())
+		default:
+			s.adminError(w, r, err)
+		}
+		return
+	}
+	s.writeCurrentStatus(w, r)
+}
+
+// backupResponse is the status answer of POST /backup, plus the backup's
+// path.
+type backupResponse struct {
+	engine.Status
+	BackupPath string `json:"backup_path"`
+}
+
+// handleBackup serves POST /backup: a 409 while the engine is running,
+// otherwise the backup's path alongside the current status.
+func (s *server) handleBackup(w http.ResponseWriter, r *http.Request) {
+	path, err := s.engine.BackupDatabase()
+	if err != nil {
+		if errors.Is(err, engine.ErrEngineRunning) {
+			s.writeConflict(w, err)
+			return
+		}
+		s.adminError(w, r, err)
+		return
+	}
+	if status, ok := s.statusAfterAction(w, r); ok {
+		writeJSON(w, http.StatusOK, backupResponse{Status: status, BackupPath: path})
+	}
+}
+
+type resetRoundRequest struct {
+	Backup bool `json:"backup"`
+}
+
+// resetRoundResponse is the status answer of POST /db/reset-round, plus the
+// backup's path when one was taken (omitted otherwise).
+type resetRoundResponse struct {
+	engine.Status
+	BackupPath string `json:"backup_path,omitempty"`
+}
+
+// handleResetRound serves POST /db/reset-round: a 409 while the engine is
+// running, otherwise resets this session's score and check-result history,
+// answering with the backup's path (if requested) alongside current status.
+func (s *server) handleResetRound(w http.ResponseWriter, r *http.Request) {
+	var req resetRoundRequest
+	if err := decodeJSON(w, r, &req); err != nil {
+		writeBodyError(w, err)
+		return
+	}
+
+	path, err := s.engine.ResetRound(req.Backup)
+	if err != nil {
+		if errors.Is(err, engine.ErrEngineRunning) {
+			s.writeConflict(w, err)
+			return
+		}
+		s.adminError(w, r, err)
+		return
+	}
+	if status, ok := s.statusAfterAction(w, r); ok {
+		writeJSON(w, http.StatusOK, resetRoundResponse{Status: status, BackupPath: path})
+	}
 }

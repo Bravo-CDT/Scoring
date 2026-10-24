@@ -1,83 +1,75 @@
-.PHONY: help up config boot login go status events kill-api pause pause-api \
-        reload break-dns fix-dns detail mass-failure restart-engine demo clean
+.PHONY: help build build-web dev run hash check check-deps demo-targets stop-demo-targets clean reset-db
 
-SCRIPT := scripts/manual-test.sh
-N ?= 5
+BIN    := bin/scoringengine
+CONFIG ?= config.yaml
+DB     ?= scoring.db
+ADDR   ?= :8080
+WEB    ?= web/dist
+
+# npm writes this on every install, so it is newer than package-lock.json
+# exactly when node_modules is up to date with it.
+NODE_MODULES := web/node_modules/.package-lock.json
 
 help:
-	@echo "Manual testing targets for docs/manual-testing.md (run in this order,"
-	@echo "or just 'make demo' to run the whole walkthrough non-interactively):"
-	@echo ""
-	@echo "  make up             1. build the engine; start fake web/api/ssh services"
-	@echo "  make config         2. write config.yaml and the admin password hash"
-	@echo "  make boot           3. start the scoring engine process (stopped+paused)"
-	@echo "  make login          4a. log in as admin, save the bearer token"
-	@echo "  make go             4b. start check routines, then resume scoring"
-	@echo "  make kill-api       5. kill the api fake service"
-	@echo "  make pause          6a. pause scoring globally, prove the score freezes"
-	@echo "  make pause-api      6b. pause only api's scoring, then resume globally"
-	@echo "  make reload         7a. add a dns service + reprice web; hot-reload"
-	@echo "  make break-dns      7b. introduce a config typo, see it rejected"
-	@echo "  make fix-dns        7c. fix the typo, start dns"
-	@echo "  make detail         8. show check/event detail is admin-only"
-	@echo "  make mass-failure   9. cross the autopause threshold twice"
-	@echo "  make restart-engine 10. SIGTERM + restart the process, state survives"
-	@echo "  make clean          11. kill everything, remove .manual-test/"
-	@echo ""
-	@echo "  make status         pretty-print GET /status any time"
-	@echo "  make events N=20    pretty-print the last N events (default 5)"
-	@echo "  make demo           run steps 1-10 automatically back to back"
+	@echo "  make build                 build the frontend to $(WEB) and the engine to $(BIN)"
+	@echo "  make run                   run it against CONFIG=$(CONFIG) DB=$(DB) ADDR=$(ADDR)"
+	@echo "                             (needs ADMIN_PASSWORD_HASH set in the environment)"
+	@echo "  make dev                   run the frontend's hot-reloading dev server, proxying"
+	@echo "                             API requests to an engine started with 'make run'"
+	@echo "  make hash PASSWORD=x       print a bcrypt hash of x for admin.password_hash"
+	@echo "  make check                 run every check in CONFIG once and print the results"
+	@echo "                             (SERVICES=\"a b\" for just those; run from the repo root)"
+	@echo "  make check-deps            apt-install the tools the checks/ scripts need"
+	@echo "                             (run once per scoring box)"
+	@echo "  make demo-targets          start three fake local services to point demo checks at"
+	@echo "  make stop-demo-targets     stop them"
+	@echo "  make clean                 remove the built binary, frontend build, and"
+	@echo "                             demo-target state"
+	@echo "                             (never touches the database)"
+	@echo "  make reset-db              DESTROYS the database at DB=$(DB) -- all scores"
+	@echo "                             and history, no undo"
+	@echo
+	@echo "First run: cp config.example.yaml config.yaml (edit it), or"
+	@echo "cp config.demo.yaml config.yaml && make demo-targets to try it out locally."
 
-up:
-	@$(SCRIPT) up
+build: build-web
+	go build -o $(BIN) ./cmd/scoringengine
 
-config:
-	@$(SCRIPT) config
+build-web: $(NODE_MODULES)
+	cd web && npm run build
 
-boot:
-	@$(SCRIPT) boot
+$(NODE_MODULES): web/package.json web/package-lock.json
+	cd web && npm ci
 
-login:
-	@$(SCRIPT) login
+dev: $(NODE_MODULES)
+	@echo "Vite proxies API requests to http://127.0.0.1:8080; in another terminal, start"
+	@echo "the engine with 'make run' (or 'make demo-targets' and config.demo.yaml first)."
+	cd web && npm run dev
 
-go:
-	@$(SCRIPT) go
+run: build
+	@test -f "$(CONFIG)" || { echo "no $(CONFIG) -- copy config.example.yaml or config.demo.yaml to $(CONFIG) first"; exit 1; }
+	@test -n "$$ADMIN_PASSWORD_HASH" || { echo "ADMIN_PASSWORD_HASH is not set -- see 'make hash'"; exit 1; }
+	$(BIN) -config "$(CONFIG)" -db "$(DB)" -addr "$(ADDR)" -web "$(WEB)"
 
-status:
-	@$(SCRIPT) status
+hash:
+	@test -n "$(PASSWORD)" || { echo "usage: make hash PASSWORD=yourpassword"; exit 1; }
+	@go run ./scripts/hashpw "$(PASSWORD)"
 
-events:
-	@$(SCRIPT) events $(N)
+check:
+	go run ./cmd/scoringengine check -config "$(CONFIG)" $(SERVICES)
 
-kill-api:
-	@$(SCRIPT) kill-api
+check-deps:
+	sudo apt-get install -y $$(grep -v '^\s*#' checks/apt-packages.txt)
 
-pause:
-	@$(SCRIPT) pause
+demo-targets:
+	@scripts/demo-targets.sh up
 
-pause-api:
-	@$(SCRIPT) pause-api
-
-reload:
-	@$(SCRIPT) reload
-
-break-dns:
-	@$(SCRIPT) break-dns
-
-fix-dns:
-	@$(SCRIPT) fix-dns
-
-detail:
-	@$(SCRIPT) detail
-
-mass-failure:
-	@$(SCRIPT) mass-failure
-
-restart-engine:
-	@$(SCRIPT) restart-engine
-
-demo:
-	@$(SCRIPT) demo
+stop-demo-targets:
+	@scripts/demo-targets.sh down
 
 clean:
-	@$(SCRIPT) clean
+	@scripts/demo-targets.sh down >/dev/null 2>&1 || true
+	rm -rf bin $(WEB) .demo-targets
+
+reset-db:
+	rm -f "$(DB)" "$(DB)-wal" "$(DB)-shm"

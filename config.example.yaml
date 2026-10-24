@@ -21,12 +21,13 @@ session_name: "example-comp"
 # changing it later has no effect on an existing session.
 starting_score: 1000
 
-# Optional. If at least this fraction (0 < f <= 1) of active services are
-# failing at the same time (each one's latest check failed), all scoring is
-# paused automatically -- a safety net for an outage on the scoring side
-# rather than the blue team's. An admin must resume it. Omit to disable.
-# Read at startup only (not on /reload).
-mass_failure_fraction: 0.8
+# Length of one scoring round, in seconds (a positive integer). Every running
+# service is checked once per round, all at the same instant, so every
+# service's results line up round by round. A check still running at the end
+# of the round is cancelled and counts as a failure. A service started (or
+# restarted) mid-round joins at the next round. Read at startup only (not on
+# /reload).
+round_interval_seconds: 30
 
 admin:
   username: admin
@@ -40,21 +41,117 @@ admin:
   # Single-quote the hash when exporting it: it contains '$' characters.
   password_hash: ${ADMIN_PASSWORD_HASH}
 
-# Each service is checked every interval_seconds (seconds, a positive integer);
-# a check still running at the end of its interval is cancelled and counts as a
-# failure. Each failure costs points_per_failure. Service names are the keys
-# for scoring history: renaming one creates a new service.
+# Each service is checked once per round (see round_interval_seconds above);
+# there is no per-service interval. Each failure costs points_per_failure.
+# Service names are the keys for scoring history: renaming one creates a new
+# service.
 #
 # check_type is one of:
 #   tcp_connect  succeeds if a TCP connection to host:port opens.
 #                params: port (required, integer 1-65535)
-#   http         plain-HTTP GET; succeeds on the expected status (and body).
+#   http         HTTP or HTTPS GET; succeeds on the expected status (and
+#                body).
 #                params: port (required, integer 1-65535), path (string
 #                starting with "/", default "/"), expect_status (integer
 #                100-599, default 200), expect_contains (optional string;
-#                substring of the first 64 KiB of the body).
+#                substring of the first 64 KiB of the body), https
+#                (optional bool, default false; use HTTPS instead of plain
+#                HTTP), server_name (optional string; address the request
+#                to this name -- Host header, TLS SNI and certificate
+#                verification -- while still connecting to host:port, like
+#                curl's --resolve), insecure_skip_verify (optional bool,
+#                default false; accept any TLS certificate, e.g. a
+#                self-signed one).
 #                Redirects are NOT followed: a 301/302 is judged as-is, so
 #                it passes only if expect_status names that code.
+#   http_exclusive  for a service that must look right on one port and must
+#                NOT also be directly reachable on a second one (e.g. nginx
+#                in front of a container: the container's own port must not
+#                be exposed). Both must hold for this check to pass.
+#                Unlike http, it DOES follow redirects (it judges what a
+#                browser would see) and expect_contains_ci matches
+#                case-insensitively.
+#                params: port (required, integer 1-65535), path (string
+#                starting with "/", default "/"), expect_status (integer
+#                100-599, default 200), expect_contains_ci (required string;
+#                case-insensitive substring of the first 64 KiB of the
+#                body), closed_port (required, integer 1-65535; must refuse
+#                or time out a TCP connection).
+#   postgres     a full login (not just a port check) plus one trivial
+#                query, so a server that accepts TCP connections but can't
+#                authenticate or serve a query still counts as down. The
+#                connection is plain (sslmode disable), matching a manual
+#                psql command that passes no TLS flags.
+#                params: port (required, integer 1-65535), user (required
+#                string), password (required string), dbname (required
+#                string).
+#   smb          logs into an SMB/CIFS server via NTLM, optionally checks a
+#                share is listed, then mounts a share and lists its root,
+#                optionally checking a specific file is present.
+#                params: port (required, integer 1-65535, 445 for SMB), user
+#                (required string), password (required string), domain
+#                (optional string, default "", NTLM domain/workgroup), share
+#                (required string, the share to mount and list),
+#                expect_share (optional string, must appear in the share
+#                listing), expect_file (optional string, must appear by
+#                exact name in the mounted share's root listing).
+#   smtp         connects, performs STARTTLS, then authenticates with AUTH
+#                PLAIN. Never sends a message -- a successful login is the
+#                pass condition, the same way pg_isready proves a database is
+#                healthy without running a query against it.
+#                params: port (required, integer 1-65535), user (required
+#                string), password (required string), insecure_skip_verify
+#                (optional bool, default false; skip TLS certificate
+#                verification during STARTTLS, for a self-signed cert).
+#   dns          sends one A query for name straight to the DNS server at
+#                host (not through the system resolver, so /etc/hosts and
+#                search domains can't make it pass); succeeds if the reply
+#                has at least one A record, and, if expect_ip is set, that
+#                address is among them.
+#                params: port (required, integer 1-65535, UDP; 53 for DNS),
+#                name (required string, the name to look up, e.g.
+#                krusty.krab), expect_ip (optional string, an IPv4 address
+#                the answer must include).
+#   ldap         a simple bind over plain LDAP, then a subtree search for an
+#                account by sAMAccountName -- like `ldapsearch -x -D
+#                bind_user -w password -b base_dn "(sAMAccountName=...)"`.
+#                Succeeds if the bind works and the account is found.
+#                params: port (required, integer 1-65535, 389 for Active
+#                Directory), bind_user (required string, passed as is; AD
+#                accepts a UPN like user@domain), password (required
+#                string), base_dn (required string, where to search, e.g.
+#                dc=krusty,dc=krab), search_user (required string, the
+#                sAMAccountName that must exist).
+#   openfire     logs in to an Openfire admin console over plain HTTP (fetch
+#                login.jsp for its CSRF cookie, then POST the login form);
+#                succeeds if the login POST answers 302 with a Location
+#                other than login.jsp.
+#                params: port (required, integer 1-65535, 9090 for
+#                Openfire), user (required string), password (required
+#                string).
+#   script       runs an executable from the checks/ directory with host as
+#                its only argument, for services no native type covers.
+#                Exit status 0 passes; anything else fails. The script's
+#                last non-empty output line (stdout and stderr combined) is
+#                shown publicly as the result's detail, pass or fail, so a
+#                script must never print a credential.
+#                params: script (required string, path to the executable;
+#                a relative path resolves against the engine's working
+#                directory, so run the engine from the repo root. Once
+#                symlinks are followed it must be an executable file inside
+#                checks/ -- anything outside is refused, since the admin
+#                console can edit and reload this config), env (optional
+#                map of extra environment variables, values string, integer
+#                or bool; every name must match ^CHECK_[A-Z0-9_]+$ -- an
+#                allowlist, because names like BASH_ENV would turn a value
+#                into code). env values are never shown publicly; pass
+#                credentials there, not on a command line. The script sees
+#                only PATH and HOME from the engine's environment, plus env.
+#                Shipped scripts: checks/ca_rpc.sh (Windows CA endpoint
+#                mapper; env CHECK_PORT, default 135) and checks/telnet.exp
+#                (telnet login; env CHECK_USER and CHECK_PASSWORD required,
+#                CHECK_PORT default 23, CHECK_EXPECT_HOSTNAME optional).
+#                Their tools are installed by `make check-deps`.
 # Params are validated per check type at startup and on /reload: a missing
 # required param, a value of the wrong type or range, or a param the check
 # type does not know (e.g. a misspelled "expect_contain") is an error naming
@@ -63,7 +160,6 @@ services:
   - name: web
     host: 10.0.0.10
     check_type: http
-    interval_seconds: 30
     points_per_failure: 5
     params:
       port: 80
@@ -74,7 +170,6 @@ services:
   - name: ssh
     host: 10.0.0.11
     check_type: tcp_connect
-    interval_seconds: 60
     points_per_failure: 10
     params:
       port: 22

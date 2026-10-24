@@ -15,6 +15,9 @@ package engine
 import (
 	"errors"
 	"fmt"
+	"os"
+	"reflect"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -28,6 +31,26 @@ import (
 // when the name matches no active service in the session. Callers (the HTTP
 // API) use errors.Is to answer such requests with 404 rather than 500.
 var ErrServiceNotFound = errors.New("engine: unknown service")
+
+// ErrScoringNotPaused is returned by AdjustScore when the global scoring
+// pause is not in effect.
+var ErrScoringNotPaused = errors.New("engine: scoring must be paused for a manual adjustment")
+
+// ErrEngineRunning is returned by BackupDatabase and ResetRound: both
+// require the engine fully stopped first.
+var ErrEngineRunning = errors.New("engine: must be stopped for this action")
+
+// MaxAdjustmentPoints bounds a manual adjustment's magnitude. Without a
+// bound, a typo (or a deliberately huge value) can push a side's ledger
+// balance close enough to math.MaxInt64 that a later adjustment, or even
+// ordinary scoring, overflows the SQL SUM in store.sideBalance, breaking
+// GetScore (and so GET /status) until the session's round data is reset.
+const MaxAdjustmentPoints = 1_000_000
+
+// ErrInvalidAdjustment is returned by AdjustScore for a side other than
+// blue/red, a zero delta, or a delta whose magnitude exceeds
+// MaxAdjustmentPoints.
+var ErrInvalidAdjustment = errors.New("engine: invalid score adjustment")
 
 // Event types the Engine writes.
 const (
@@ -45,6 +68,11 @@ const (
 	EventServiceRemoved        = "service_removed"
 	EventConfigReloaded        = "config_reloaded"
 	EventConfigSnapshotFailed  = "config_snapshot_failed"
+	EventCountdownChanged      = "countdown_changed"
+	EventScoreAdjusted         = "score_adjusted"
+	EventDatabaseBackedUp      = "database_backed_up"
+	EventRoundReset            = "round_reset"
+	EventStartingScoreChanged  = "starting_score_changed"
 )
 
 // StartFailure reports one service whose routine failed to start, for the
@@ -79,8 +107,11 @@ func (e *StartError) Failure() StartFailure {
 // orders Reload documents, and the added services whose routine failed to
 // start. All three are non-nil.
 type ReloadResult struct {
-	Added   []string       `json:"added"`
-	Removed []string       `json:"removed"`
+	Added   []string `json:"added"`
+	Removed []string `json:"removed"`
+	// Updated lists running services whose config entry changed, which were
+	// restarted so the change applies from the next round.
+	Updated []string       `json:"updated"`
 	Failed  []StartFailure `json:"failed"`
 }
 
@@ -102,25 +133,35 @@ type Engine struct {
 	scheduler  *scheduler.Scheduler
 	configPath string
 
-	// mu serializes the control operations (everything but Status and the
-	// scoring pause/resume levers, which must stay usable while another
-	// operation is stuck; see setGlobalScoringPaused) and guards
+	// mu serializes the control operations (everything but Status, the
+	// scoring pause/resume levers and SetCountdownTarget, which must stay
+	// usable while another operation is stuck; see setGlobalScoringPaused
+	// and SetCountdownTarget) and guards
 	// desiredEnabled. Serializing is what keeps each operation's
 	// check-then-act sound: Stop cannot interleave with a StartService that
 	// has already seen the engine running and so leave a routine running
 	// behind a stopped engine, and a routine is known to be running exactly
 	// when the scheduler says so.
 	//
-	// It is held across scheduler calls that block, such as StopService
-	// waiting for a routine to exit. That cannot deadlock: nothing a routine
-	// does (running its check, the scorer recording the result) ever calls
-	// back into the Engine, and the Engine never holds a database connection
-	// (an open transaction or unclosed rows) while it waits. Status does not
-	// take mu, so reads stay responsive while an operation waits.
+	// It is held across scheduler calls that can block, such as StopService
+	// waiting out a round the scheduler is recording. That wait is bounded by
+	// the scorer's local database writes, never by a check running, and it
+	// cannot deadlock: nothing the round loop does (running checks, the scorer
+	// recording the round) ever calls back into the Engine, and the Engine
+	// never holds a database connection (an open transaction or unclosed rows)
+	// while it waits. Status does not take mu, so reads stay responsive while
+	// an operation waits.
 	mu sync.Mutex
 	// desiredEnabled holds each service's admin-chosen routine state; a
 	// service absent from it is enabled.
 	desiredEnabled map[int64]bool
+
+	// configHashMu guards configHash, read far more often (every config
+	// editor poll) than it is written (one Reload at a time), so it stays
+	// separate from mu rather than requiring every reader to take the
+	// control-operation lock.
+	configHashMu sync.Mutex
+	configHash   string
 }
 
 // New wires a store, a session and a scheduler together. configPath is the
@@ -139,7 +180,8 @@ func New(st *store.Store, sess store.Session, sched *scheduler.Scheduler, config
 
 // Start marks the engine running and starts the routine of every active
 // service an admin has not stopped. It leaves scoring paused or not as it
-// was: resuming scoring is a separate decision (ResumeScoring).
+// was: resuming scoring is a separate decision (ResumeScoring). Starting a
+// stopped engine runs a round at once and times the following rounds from it.
 //
 // A service whose routine fails to start (its config entry is missing, say) is
 // logged as an error event, skipped and returned in failed (non-nil, empty
@@ -176,6 +218,9 @@ func (e *Engine) Start() (failed []StartFailure, err error) {
 	if rs.EngineState == store.EngineRunning {
 		return failed, nil
 	}
+	// Check right away rather than at the round loop's next tick, and time
+	// the rounds from here.
+	e.scheduler.StartRoundNow()
 	return failed, e.logEngineEvent(ActorAdmin, EventEngineStarted, "engine started")
 }
 
@@ -223,15 +268,60 @@ func (e *Engine) ResumeScoring() error {
 
 // setGlobalScoringPaused deliberately does not take mu: pausing scoring is the
 // admin's emergency lever and must work even while another control operation
-// is stuck in mu (say, a StopService waiting on a check that ignores
-// cancellation). It needs no serialization — it is one write of a single
-// last-writer-wins flag, read fresh by the scorer on every result, and no
-// control operation checks it before acting — plus an event.
+// is held up in mu (say, a StopService waiting out a round the scheduler is
+// recording, which a slow database write can stretch). It needs no
+// serialization — it is one write of a single last-writer-wins flag, read
+// fresh by the scorer on every result, and no control operation checks it
+// before acting — plus an event.
 func (e *Engine) setGlobalScoringPaused(paused bool, eventType, message string) error {
 	if err := e.store.SetGlobalScoringPaused(paused); err != nil {
 		return fmt.Errorf("engine: %s: %w", message, err)
 	}
 	return e.logEngineEvent(ActorAdmin, eventType, message)
+}
+
+// AdjustScore manually adjusts side's score by delta (nonzero), independent
+// of the other side. It requires the global scoring pause (status.scoring_paused
+// -- regardless of whether the engine itself is running or stopped), checked
+// fresh on every call, the same lever-style pattern as setGlobalScoringPaused:
+// it must stay usable even while a control operation is stuck in mu, so it
+// does not take mu.
+func (e *Engine) AdjustScore(side string, delta int, reason string) error {
+	if (side != store.SideBlue && side != store.SideRed) ||
+		delta == 0 || delta > MaxAdjustmentPoints || delta < -MaxAdjustmentPoints {
+		return ErrInvalidAdjustment
+	}
+	rs, err := e.store.GetRunState()
+	if err != nil {
+		return fmt.Errorf("engine: adjusting score: %w", err)
+	}
+	if !rs.ScoringPaused {
+		return ErrScoringNotPaused
+	}
+	if _, err := e.store.AdjustScore(e.session.ID, side, delta, reason); err != nil {
+		return fmt.Errorf("engine: adjusting score: %w", err)
+	}
+	return e.logEngineEvent(ActorAdmin, EventScoreAdjusted,
+		fmt.Sprintf("%s adjusted by %+d: %s", side, delta, reason))
+}
+
+// SetCountdownTarget sets the time the scoreboard's countdown runs to, or
+// clears it when target is nil. The target is display-only: nothing in the
+// engine acts on it.
+//
+// It does not take mu, for the same reason as setGlobalScoringPaused: it is
+// one write of a single last-writer-wins value that no control operation
+// checks before acting, so it needs no serialization and should not wait
+// behind an operation held up in mu.
+func (e *Engine) SetCountdownTarget(target *time.Time) error {
+	if err := e.store.SetCountdownTarget(target); err != nil {
+		return fmt.Errorf("engine: setting countdown target: %w", err)
+	}
+	msg := "countdown target cleared"
+	if target != nil {
+		msg = "countdown target set to " + target.UTC().Format(time.RFC3339)
+	}
+	return e.logEngineEvent(ActorAdmin, EventCountdownChanged, msg)
 }
 
 // StartService enables the named service's routine and, if the engine is
@@ -262,9 +352,13 @@ func (e *Engine) StartService(name string) error {
 	return e.logServiceEvent(ActorAdmin, svc, EventRoutineStarted, svc.Name+" routine started")
 }
 
-// StopService disables the named service's routine and stops it, waiting for
-// it to exit. The service stays stopped across engine stops and starts until
-// StartService or RestartService enables it again.
+// StopService disables the named service's routine and stops it: its check in
+// the round in progress, if any, is cancelled and its result discarded. It can
+// wait briefly for the scheduler to finish recording a round that already
+// ended (bounded by local database writes, never by a check), so once it
+// returns no further result for the service is recorded. The service stays
+// stopped across engine stops and starts until StartService or RestartService
+// enables it again.
 func (e *Engine) StopService(name string) error {
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -362,8 +456,11 @@ func (e *Engine) setServiceScoringPaused(name string, paused bool, eventType, wh
 //     engine is running.
 //   - An active service missing from the file has its routine stopped and is
 //     retired; its history stays queryable.
-//   - A service in both is left alone, routine untouched: edits to its entry
-//     take effect on RestartService.
+//   - A service in both whose routine is running with a different entry is
+//     restarted with the new one; otherwise it is left alone. (A stopped
+//     routine reads its entry afresh whenever it starts.)
+//   - A changed starting_score is applied, moving blue's score by the
+//     difference.
 //
 // Reload never changes the engine state or the global scoring pause. An
 // invalid file changes nothing. An added service whose routine fails to start
@@ -382,7 +479,7 @@ func (e *Engine) ReloadAs(actor Actor, configPath string) (ReloadResult, error) 
 	if configPath == "" {
 		configPath = e.configPath
 	}
-	res := ReloadResult{Added: []string{}, Removed: []string{}, Failed: []StartFailure{}}
+	res := ReloadResult{Added: []string{}, Removed: []string{}, Updated: []string{}, Failed: []StartFailure{}}
 
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -390,6 +487,10 @@ func (e *Engine) ReloadAs(actor Actor, configPath string) (ReloadResult, error) 
 	cfg, err := config.Load(configPath)
 	if err != nil {
 		return res, fmt.Errorf("engine: reloading config: %w", err)
+	}
+	e.recordLoadedConfigHash(configPath)
+	if err := e.applyStartingScore(actor, cfg.StartingScore); err != nil {
+		return res, err
 	}
 	active, err := e.store.ListActiveServices(e.session.ID)
 	if err != nil {
@@ -415,6 +516,21 @@ func (e *Engine) ReloadAs(actor Actor, configPath string) (ReloadResult, error) 
 		}
 		res.Removed = append(res.Removed, svc.Name)
 	}
+	for _, svc := range active {
+		if !inConfig[svc.Name] {
+			continue
+		}
+		updated, startErr, err := e.restartIfChanged(actor, svc, cfg)
+		if updated {
+			res.Updated = append(res.Updated, svc.Name)
+		}
+		if startErr != nil {
+			res.Failed = append(res.Failed, startErr.Failure())
+		}
+		if err != nil {
+			return res, err
+		}
+	}
 	for _, sc := range cfg.Services {
 		if isActive[sc.Name] {
 			continue
@@ -431,12 +547,144 @@ func (e *Engine) ReloadAs(actor Actor, configPath string) (ReloadResult, error) 
 		}
 	}
 
-	if actor == ActorSystem && len(res.Added) == 0 && len(res.Removed) == 0 {
+	if actor == ActorSystem && len(res.Added) == 0 && len(res.Removed) == 0 && len(res.Updated) == 0 {
 		return res, nil
 	}
-	msg := fmt.Sprintf("config reloaded: added [%s], removed [%s]",
-		strings.Join(res.Added, ", "), strings.Join(res.Removed, ", "))
+	msg := fmt.Sprintf("config reloaded: added [%s], removed [%s], updated [%s]",
+		strings.Join(res.Added, ", "), strings.Join(res.Removed, ", "), strings.Join(res.Updated, ", "))
 	return res, e.logEngineEvent(actor, EventConfigReloaded, msg)
+}
+
+// LoadedConfigHash returns the hash of the config file this Engine last
+// successfully loaded (at construction and on every successful Reload).
+func (e *Engine) LoadedConfigHash() string {
+	e.configHashMu.Lock()
+	defer e.configHashMu.Unlock()
+	return e.configHash
+}
+
+// recordLoadedConfigHash re-reads configPath (already known loadable, since
+// the caller just parsed it) and records its hash as the one this Engine has
+// loaded. Best effort, mirroring snapshotConfig's best-effort style: on a
+// rare failure to re-read the same file moments after loading it (e.g. it
+// was deleted in between), LoadedConfigHash simply keeps its previous value
+// until the next successful reload. Not worth an event of its own: nothing
+// scored is affected, only the config-editor's "stale" indicator for one
+// cycle.
+func (e *Engine) recordLoadedConfigHash(configPath string) {
+	raw, err := os.ReadFile(configPath)
+	if err != nil {
+		return
+	}
+	e.configHashMu.Lock()
+	e.configHash = config.Hash(raw)
+	e.configHashMu.Unlock()
+}
+
+// BackupDatabase snapshots the database, requiring the engine be fully
+// stopped. Returns the backup file's path.
+func (e *Engine) BackupDatabase() (string, error) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.backupLocked()
+}
+
+// backupLocked is BackupDatabase's body, callable by ResetRound (which
+// already holds mu) without re-locking it.
+func (e *Engine) backupLocked() (string, error) {
+	running, err := e.engineRunning()
+	if err != nil {
+		return "", err
+	}
+	if running {
+		return "", ErrEngineRunning
+	}
+	path, err := e.store.Backup()
+	if err != nil {
+		return "", fmt.Errorf("engine: backing up database: %w", err)
+	}
+	if err := e.logEngineEvent(ActorAdmin, EventDatabaseBackedUp, "database backed up to "+path); err != nil {
+		return path, err
+	}
+	return path, nil
+}
+
+// ResetRound deletes this session's score and check-result history,
+// requiring the engine be fully stopped. If backup is true, it snapshots the
+// database first; if that backup fails, nothing is reset and the error is
+// returned. Returns the backup's path, or "" if backup was false.
+//
+// Admin event history, the session row, service definitions, and config
+// snapshots are untouched, so the admin console and login keep working
+// immediately -- no restart needed. "Resetting credentials to their
+// defaults" needs no extra step here: every service routine already
+// re-reads config.yaml fresh the moment it is (re)started
+// (scheduler.start()), so the next "Start engine" after a reset naturally
+// uses whatever the file currently contains.
+func (e *Engine) ResetRound(backup bool) (string, error) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	var path string
+	if backup {
+		var err error
+		if path, err = e.backupLocked(); err != nil {
+			return "", err
+		}
+	} else if running, err := e.engineRunning(); err != nil {
+		return "", err
+	} else if running {
+		return "", ErrEngineRunning
+	}
+
+	if err := e.store.ResetRoundData(e.session.ID); err != nil {
+		return path, fmt.Errorf("engine: resetting round data: %w", err)
+	}
+	// The engine is stopped (checked above), so no service is enabled and
+	// no round can be recorded under the old numbering.
+	e.scheduler.ResetRounds()
+	if err := e.logEngineEvent(ActorAdmin, EventRoundReset, "round reset: score and check history cleared"); err != nil {
+		return path, err
+	}
+	return path, nil
+}
+
+// applyStartingScore sets the session's starting score to startingScore if
+// it differs, and logs the change. The caller holds mu.
+func (e *Engine) applyStartingScore(actor Actor, startingScore int) error {
+	current, err := e.store.SessionStartingScore(e.session.ID)
+	if err != nil {
+		return fmt.Errorf("engine: reloading config: %w", err)
+	}
+	if current == startingScore {
+		return nil
+	}
+	if err := e.store.SetSessionStartingScore(e.session.ID, startingScore); err != nil {
+		return fmt.Errorf("engine: reloading config: %w", err)
+	}
+	return e.logEngineEvent(actor, EventStartingScoreChanged,
+		fmt.Sprintf("starting score changed from %d to %d", current, startingScore))
+}
+
+// restartIfChanged restarts svc's routine if it is running with an entry
+// other than cfg's, reporting whether it did. A failed restart leaves the
+// routine stopped, as RestartService does. The caller holds mu.
+func (e *Engine) restartIfChanged(actor Actor, svc store.Service, cfg *config.Config) (bool, *StartError, error) {
+	running, ok := e.scheduler.ServiceConfig(svc.ID)
+	if !ok {
+		return false, nil, nil
+	}
+	i := slices.IndexFunc(cfg.Services, func(sc config.ServiceConfig) bool { return sc.Name == svc.Name })
+	if i < 0 || reflect.DeepEqual(running, cfg.Services[i]) {
+		return false, nil, nil
+	}
+	if err := e.scheduler.RestartService(svc.ID, svc.Name); err != nil {
+		e.logStartFailure(svc, actor, err)
+		return true, &StartError{Service: svc.Name, Err: err}, nil
+	}
+	e.snapshotConfig(svc)
+	return true, nil, e.logServiceEvent(actor, svc, EventRoutineRestarted,
+		svc.Name+" routine restarted with its changed config entry")
 }
 
 // retire stops svc's routine and deactivates it. The caller holds mu.
@@ -480,6 +728,9 @@ type ServiceStatus struct {
 	Up bool `json:"up"`
 	// RoutineEnabled is whether the service's check routine is running.
 	RoutineEnabled bool `json:"routine_enabled"`
+	// Checking is whether the service's check is part of the round in
+	// progress right now, mid-flight.
+	Checking bool `json:"checking"`
 	// ScoringPaused is the service's own pause; the global one is in Status.
 	ScoringPaused bool `json:"scoring_paused"`
 	// LastCheckTime is when the latest check ran; omitted before any check.
@@ -488,17 +739,25 @@ type ServiceStatus struct {
 	ConsecutiveFailures int        `json:"consecutive_failures"`
 }
 
-// Status is a point-in-time view of the session: score, run state, and every
-// active service, ordered by name.
+// Status is a point-in-time view of the session: score, run state, round
+// clock, and every active service, ordered by name.
 type Status struct {
-	SessionName   string          `json:"session_name"`
-	StartingScore int             `json:"starting_score"`
-	BlueScore     int             `json:"blue_score"`
-	RedScore      int             `json:"red_score"`
-	EngineState   string          `json:"engine_state"`
-	ScoringPaused bool            `json:"scoring_paused"`
-	ServerTime    time.Time       `json:"server_time"`
-	Services      []ServiceStatus `json:"services"`
+	SessionName   string    `json:"session_name"`
+	StartingScore int       `json:"starting_score"`
+	BlueScore     int       `json:"blue_score"`
+	RedScore      int       `json:"red_score"`
+	EngineState   string    `json:"engine_state"`
+	ScoringPaused bool      `json:"scoring_paused"`
+	ServerTime    time.Time `json:"server_time"`
+	// Round is the number of the last round recorded. NextRoundAt is when the
+	// next round is due; it is the zero time until this process records a
+	// round, and holds its last value while no service is being checked.
+	Round       int       `json:"round"`
+	NextRoundAt time.Time `json:"next_round_at"`
+	// CountdownTarget is the admin-set time the countdown runs to; omitted
+	// while unset.
+	CountdownTarget *time.Time      `json:"countdown_target,omitempty"`
+	Services        []ServiceStatus `json:"services"`
 }
 
 // Status reports the session's current state. It does not wait for control
@@ -506,6 +765,10 @@ type Status struct {
 // atomic snapshot.
 func (e *Engine) Status() (Status, error) {
 	blue, red, err := e.store.GetScore(e.session.ID)
+	if err != nil {
+		return Status{}, fmt.Errorf("engine: status: %w", err)
+	}
+	startingScore, err := e.store.SessionStartingScore(e.session.ID)
 	if err != nil {
 		return Status{}, fmt.Errorf("engine: status: %w", err)
 	}
@@ -518,20 +781,26 @@ func (e *Engine) Status() (Status, error) {
 		return Status{}, fmt.Errorf("engine: status: %w", err)
 	}
 
+	round, nextRoundAt := e.scheduler.RoundStatus()
+
 	out := Status{
-		SessionName:   e.session.Name,
-		StartingScore: e.session.StartingScore,
-		BlueScore:     blue,
-		RedScore:      red,
-		EngineState:   rs.EngineState,
-		ScoringPaused: rs.ScoringPaused,
-		ServerTime:    time.Now().UTC(),
-		Services:      make([]ServiceStatus, 0, len(svcs)),
+		SessionName:     e.session.Name,
+		StartingScore:   startingScore,
+		BlueScore:       blue,
+		RedScore:        red,
+		EngineState:     rs.EngineState,
+		ScoringPaused:   rs.ScoringPaused,
+		ServerTime:      time.Now().UTC(),
+		Round:           round,
+		NextRoundAt:     nextRoundAt,
+		CountdownTarget: rs.CountdownTarget,
+		Services:        make([]ServiceStatus, 0, len(svcs)),
 	}
 	for _, svc := range svcs {
 		ss := ServiceStatus{
 			Name:           svc.Name,
 			RoutineEnabled: e.scheduler.IsRunning(svc.ID),
+			Checking:       e.scheduler.IsChecking(svc.ID),
 			ScoringPaused:  svc.ScoringPaused,
 		}
 		latest, err := e.store.GetLatestCheckResult(svc.ID)

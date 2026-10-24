@@ -466,3 +466,54 @@ func TestGetScore_UnknownSessionFails(t *testing.T) {
 		t.Fatalf("err = %v, want it to wrap sql.ErrNoRows", err)
 	}
 }
+
+func TestAdjustScore_AddsToOneSideWithoutTouchingTheOther(t *testing.T) {
+	st := openTemp(t)
+	sess := ledgerSession(t, st, 1000)
+
+	if _, err := st.AdjustScore(sess.ID, SideBlue, 50, "correction"); err != nil {
+		t.Fatalf("AdjustScore: %v", err)
+	}
+	blue, red, err := st.GetScore(sess.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if blue != 1050 || red != 0 {
+		t.Fatalf("GetScore = (%d, %d), want (1050, 0)", blue, red)
+	}
+}
+
+func TestAdjustScore_DeductionFloorsAtZero(t *testing.T) {
+	st := openTemp(t)
+	sess := ledgerSession(t, st, 1000)
+
+	if _, err := st.AdjustScore(sess.ID, SideBlue, -5000, "correction"); err != nil {
+		t.Fatalf("AdjustScore: %v", err)
+	}
+	blue, _, err := st.GetScore(sess.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if blue != 0 {
+		t.Fatalf("GetScore blue = %d, want 0 (floored, not negative)", blue)
+	}
+}
+
+func TestAdjustScore_EachCallIsASeparateLedgerEntry(t *testing.T) {
+	st := openTemp(t)
+	sess := ledgerSession(t, st, 1000)
+
+	if _, err := st.AdjustScore(sess.ID, SideRed, 10, "a"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.AdjustScore(sess.ID, SideRed, 10, "b"); err != nil {
+		t.Fatal(err)
+	}
+	_, red, err := st.GetScore(sess.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if red != 20 {
+		t.Fatalf("GetScore red = %d, want 20 (two separate +10 adjustments)", red)
+	}
+}

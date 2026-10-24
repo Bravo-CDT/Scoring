@@ -52,6 +52,10 @@ func sanitizeDetail(detail string) string {
 // CheckResult is one recorded check of one service: whether it answered, how
 // long it took, and what it said.
 //
+// Round is the scoring round the check belongs to. Every service is checked
+// once per round, so the round number is what lines results up across
+// services; NextRoundNumber finds where a restarted engine resumes.
+//
 // Timestamp is when the check ran, stored as Unix milliseconds and always read
 // back in UTC. It is the engine's clock, not the database's, so results from
 // concurrent checks can reach the table slightly out of timestamp order; the
@@ -64,6 +68,7 @@ type CheckResult struct {
 	ID        int64
 	SessionID int64
 	ServiceID int64
+	Round     int
 	Timestamp time.Time
 	Success   bool
 	LatencyMS int64
@@ -71,7 +76,7 @@ type CheckResult struct {
 }
 
 // checkResultColumns is the select list scanCheckResult expects, in order.
-const checkResultColumns = `id, session_id, service_id, timestamp, success, latency_ms, detail`
+const checkResultColumns = `id, session_id, service_id, round, timestamp, success, latency_ms, detail`
 
 // newestFirst orders the history queries. Timestamps are only millisecond
 // precise, so the id is needed as a tiebreaker: without it two checks that
@@ -90,9 +95,7 @@ const newestFirst = `ORDER BY timestamp DESC, id DESC`
 // it backwards).
 const lastInserted = `ORDER BY id DESC`
 
-// The per-service "latest" queries. They run on every check result (the
-// scorer's mass-failure check reads every service's latest outcome each
-// time), so each is written to be answered from idx_check_results_service —
+// The per-service "latest" queries. They run on every check result, so each is written to be answered from idx_check_results_service —
 // whose entries are (service_id, rowid), already in lastInserted order —
 // reading only the newest rows rather than sorting or scanning a service's
 // whole history. TestPerServiceLatestQueriesUseTheServiceIndex pins the plans.
@@ -108,18 +111,6 @@ const (
 		   AND id > COALESCE(
 		       (SELECT id FROM check_results WHERE service_id = ? AND success = 1
 		        ` + lastInserted + ` LIMIT 1), 0)`
-
-	// The subquery matches on service_id alone (a service belongs to exactly
-	// one session); also matching session_id would steer the planner to the
-	// (session_id, service_id, timestamp) index, which then has to sort each
-	// service's whole history by id.
-	activeServiceOutcomesSQL = `SELECT sv.id, COALESCE(
-		     (SELECT cr.success = 0 FROM check_results cr
-		      WHERE cr.service_id = sv.id
-		      ` + lastInserted + ` LIMIT 1), FALSE)
-		 FROM services sv
-		 WHERE sv.session_id = ? AND sv.active = 1
-		 ORDER BY sv.id`
 )
 
 // scanCheckResult reads one checkResultColumns row. Its error is returned
@@ -127,7 +118,7 @@ const (
 func scanCheckResult(sc rowScanner) (CheckResult, error) {
 	var cr CheckResult
 	var timestampMillis int64
-	err := sc.Scan(&cr.ID, &cr.SessionID, &cr.ServiceID, &timestampMillis, &cr.Success, &cr.LatencyMS, &cr.Detail)
+	err := sc.Scan(&cr.ID, &cr.SessionID, &cr.ServiceID, &cr.Round, &timestampMillis, &cr.Success, &cr.LatencyMS, &cr.Detail)
 	if err != nil {
 		return CheckResult{}, err
 	}
@@ -143,9 +134,9 @@ func scanCheckResult(sc rowScanner) (CheckResult, error) {
 // end of every newest-first listing.
 func (s *Store) InsertCheckResult(cr CheckResult) (int64, error) {
 	res, err := s.db.Exec(
-		`INSERT INTO check_results (session_id, service_id, timestamp, success, latency_ms, detail)
-		 VALUES (?, ?, ?, ?, ?, ?)`,
-		cr.SessionID, cr.ServiceID, timestampMillis(cr.Timestamp), cr.Success, cr.LatencyMS,
+		`INSERT INTO check_results (session_id, service_id, round, timestamp, success, latency_ms, detail)
+		 VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		cr.SessionID, cr.ServiceID, cr.Round, timestampMillis(cr.Timestamp), cr.Success, cr.LatencyMS,
 		sanitizeDetail(cr.Detail),
 	)
 	if err != nil {
@@ -156,6 +147,21 @@ func (s *Store) InsertCheckResult(cr CheckResult) (int64, error) {
 		return 0, fmt.Errorf("store: reading new check result id for service %d: %w", cr.ServiceID, err)
 	}
 	return id, nil
+}
+
+// NextRoundNumber returns the round a session's next check results belong to:
+// one past the highest round it has recorded, or 1 if it has none. Taking the
+// highest rather than the latest-inserted round keeps the numbering strictly
+// increasing however the results of one round were interleaved.
+func (s *Store) NextRoundNumber(sessionID int64) (int, error) {
+	var highest int
+	err := s.db.QueryRow(
+		`SELECT COALESCE(MAX(round), 0) FROM check_results WHERE session_id = ?`, sessionID,
+	).Scan(&highest)
+	if err != nil {
+		return 0, fmt.Errorf("store: finding next round number for session %d: %w", sessionID, err)
+	}
+	return highest + 1, nil
 }
 
 // GetLatestCheckResult returns the service's most recent check result (the
@@ -223,45 +229,6 @@ func (s *Store) CountConsecutiveFailures(serviceID int64) (int, error) {
 		return 0, fmt.Errorf("store: counting consecutive failures for service %d: %w", serviceID, err)
 	}
 	return count, nil
-}
-
-// ServiceOutcome is one active service's current state for the mass-failure
-// check: whether its most recent check result is a failure.
-type ServiceOutcome struct {
-	ServiceID int64
-	// Failing is true when the latest result (by the same insert order as
-	// GetLatestCheckResult) is a failure. A service with no result yet is
-	// not failing: "no result yet" is unknown, not down.
-	Failing bool
-}
-
-// ActiveServiceOutcomes returns the current outcome of every active service in
-// the session, in service id order. Inactive services are left out.
-//
-// Services that have not reported yet are included (as not failing), so a
-// caller dividing failures by the number of services does not mistake the
-// first failure of a competition for 100% of services down. It returns every
-// service rather than two counts so the caller can narrow the set further
-// (the scorer keeps only services whose routine is running).
-func (s *Store) ActiveServiceOutcomes(sessionID int64) ([]ServiceOutcome, error) {
-	rows, err := s.db.Query(activeServiceOutcomesSQL, sessionID)
-	if err != nil {
-		return nil, fmt.Errorf("store: listing active service outcomes in session %d: %w", sessionID, err)
-	}
-	defer rows.Close()
-
-	var out []ServiceOutcome
-	for rows.Next() {
-		var o ServiceOutcome
-		if err := rows.Scan(&o.ServiceID, &o.Failing); err != nil {
-			return nil, fmt.Errorf("store: scanning service outcome row: %w", err)
-		}
-		out = append(out, o)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("store: listing active service outcomes in session %d: %w", sessionID, err)
-	}
-	return out, nil
 }
 
 // timestampMillis is how every timestamp reaches the database: Unix

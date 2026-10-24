@@ -1,6 +1,81 @@
 package store
 
-import "testing"
+import (
+	"path/filepath"
+	"testing"
+	"time"
+)
+
+func TestGetRunState_NoCountdownOnFreshDatabase(t *testing.T) {
+	st := openTemp(t)
+
+	rs, err := st.GetRunState()
+	if err != nil {
+		t.Fatalf("GetRunState: %v", err)
+	}
+	if rs.CountdownTarget != nil {
+		t.Errorf("CountdownTarget = %v on a fresh database, want nil", rs.CountdownTarget)
+	}
+}
+
+func TestSetCountdownTarget_PersistsAndClears(t *testing.T) {
+	st := openTemp(t)
+
+	// Given in a non-UTC zone: the stored instant must survive, and it is read
+	// back in UTC like every other timestamp.
+	target := time.Date(2026, 10, 17, 13, 0, 0, 0, time.FixedZone("EDT", -4*60*60))
+	if err := st.SetCountdownTarget(&target); err != nil {
+		t.Fatalf("SetCountdownTarget: %v", err)
+	}
+	rs, err := st.GetRunState()
+	if err != nil {
+		t.Fatalf("GetRunState: %v", err)
+	}
+	if rs.CountdownTarget == nil || !rs.CountdownTarget.Equal(target) {
+		t.Fatalf("CountdownTarget = %v, want %v", rs.CountdownTarget, target)
+	}
+	if rs.CountdownTarget.Location() != time.UTC {
+		t.Errorf("CountdownTarget location = %v, want UTC", rs.CountdownTarget.Location())
+	}
+
+	if err := st.SetCountdownTarget(nil); err != nil {
+		t.Fatalf("SetCountdownTarget(nil): %v", err)
+	}
+	rs, err = st.GetRunState()
+	if err != nil {
+		t.Fatalf("GetRunState: %v", err)
+	}
+	if rs.CountdownTarget != nil {
+		t.Errorf("CountdownTarget = %v after clearing, want nil", rs.CountdownTarget)
+	}
+}
+
+func TestOpen_PreservesCountdownTargetAcrossReopen(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "scoring.db")
+
+	st1 := openAt(t, path)
+	target := time.Date(2026, 10, 17, 17, 0, 0, 0, time.UTC)
+	if err := st1.SetCountdownTarget(&target); err != nil {
+		t.Fatalf("SetCountdownTarget: %v", err)
+	}
+	if err := st1.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	// The restart's safe-default reset stops the engine and pauses scoring,
+	// but the countdown is an admin's schedule, not run state to distrust.
+	st2 := openAt(t, path)
+	rs, err := st2.GetRunState()
+	if err != nil {
+		t.Fatalf("GetRunState: %v", err)
+	}
+	if rs.CountdownTarget == nil || !rs.CountdownTarget.Equal(target) {
+		t.Errorf("CountdownTarget = %v after reopen, want %v", rs.CountdownTarget, target)
+	}
+	if rs.EngineState != EngineStopped || !rs.ScoringPaused {
+		t.Errorf("run state after reopen = %+v, want stopped and paused", rs)
+	}
+}
 
 func TestGetRunState_SafeDefaultsOnFreshDatabase(t *testing.T) {
 	st := openTemp(t)

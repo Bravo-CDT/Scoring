@@ -47,6 +47,7 @@ func configYAML(names ...string) string {
 	fmt.Fprintf(&b, `
 session_name: "comp-1"
 starting_score: 1000
+round_interval_seconds: 1
 admin:
   username: %s
   password_hash: %q
@@ -56,7 +57,6 @@ services:
 		fmt.Fprintf(&b, `  - name: %s
     host: 127.0.0.1
     check_type: tcp_connect
-    interval_seconds: 1
     points_per_failure: 10
     params: {port: 9}
 `, n)
@@ -100,6 +100,10 @@ func failCheck(context.Context, string, map[string]any) checks.Result {
 	return checks.Result{Success: false, Detail: "connection refused"}
 }
 
+// testRound is the harness scheduler's round interval: short, so a started
+// service is checked within milliseconds.
+const testRound = 20 * time.Millisecond
+
 // newHarness builds the full stack (store, scorer, scheduler, engine, auth)
 // the way the binary does, with service rows created as at startup, and
 // serves the API over a real HTTP server.
@@ -127,11 +131,15 @@ func newHarness(t *testing.T, check checks.CheckFunc, services ...string) *harne
 
 	registry := checks.NewRegistry()
 	registry.Register("tcp_connect", check)
-	sched := scheduler.New(registry, scorer.New(st, h.sess.ID, nil), h.configPath)
-	sched.SetMaxStagger(0)
+	sched := scheduler.New(registry, scorer.New(st, h.sess.ID), h.configPath, testRound)
 	h.e = engine.New(st, h.sess, sched, h.configPath)
 	// Registered after the store's Close, so it runs first.
 	t.Cleanup(func() { h.e.Stop() })
+	// Registered after that, so it runs before both: as in app.Close, the
+	// round loop is gone before anything it records into is torn down.
+	ctx, cancel := context.WithCancel(context.Background())
+	done := sched.Run(ctx, 1)
+	t.Cleanup(func() { cancel(); <-done })
 
 	a := auth.New(testUsername, testHash)
 	srv := httptest.NewServer(newServer(h.e, st, h.sess.ID, a, h.configPath, log.New(h.logs, "", 0)))
@@ -263,6 +271,7 @@ var adminRoutes = []string{
 	"/services/svc1/scoring/pause",
 	"/services/svc1/scoring/resume",
 	"/reload",
+	"/countdown",
 }
 
 func TestStatus_DocumentedFields(t *testing.T) {
@@ -271,8 +280,9 @@ func TestStatus_DocumentedFields(t *testing.T) {
 	h.mustStatus(r, http.StatusOK, "GET /status")
 
 	out := r.object(t)
-	wantTop := []string{"blue_score", "engine_state", "red_score", "scoring_paused",
-		"server_time", "services", "session_name", "starting_score"}
+	// countdown_target is omitted until an admin sets one.
+	wantTop := []string{"blue_score", "engine_state", "next_round_at", "red_score", "round",
+		"scoring_paused", "server_time", "services", "session_name", "starting_score"}
 	if got := keys(out); !slices.Equal(got, wantTop) {
 		t.Errorf("status keys = %v, want %v", got, wantTop)
 	}
@@ -298,7 +308,7 @@ func TestStatus_DocumentedFields(t *testing.T) {
 	}
 	svc, _ := services[0].(map[string]any)
 	// last_check_time is omitted before any check has run.
-	wantSvc := []string{"consecutive_failures", "latency_ms", "name", "routine_enabled", "scoring_paused", "up"}
+	wantSvc := []string{"checking", "consecutive_failures", "latency_ms", "name", "routine_enabled", "scoring_paused", "up"}
 	if got := keys(svc); !slices.Equal(got, wantSvc) {
 		t.Errorf("service keys = %v, want %v", got, wantSvc)
 	}
@@ -530,44 +540,37 @@ func TestRestart(t *testing.T) {
 	})
 }
 
-func TestResults_DetailOnlyForAdmin(t *testing.T) {
+// Check detail is public: the scoreboard shows why a check failed. Event
+// detail stays admin-only (TestEvents_DetailStaysAdminOnlyForEveryType).
+func TestResults_DetailIsPublic(t *testing.T) {
 	h := newHarness(t, okCheck, "svc1")
 	svc := h.service("svc1")
 	ts := time.Date(2026, 10, 15, 12, 0, 0, 0, time.UTC)
 	if _, err := h.st.InsertCheckResult(store.CheckResult{
-		SessionID: h.sess.ID, ServiceID: svc.ID, Timestamp: ts,
-		Success: false, LatencyMS: 5, Detail: "super-secret-credential-leak",
+		SessionID: h.sess.ID, ServiceID: svc.ID, Round: 3, Timestamp: ts,
+		Success: false, LatencyMS: 5, Detail: "connection refused",
 	}); err != nil {
 		t.Fatalf("InsertCheckResult: %v", err)
 	}
-	token := h.login()
 
-	for _, tc := range []struct {
-		name, token string
-		wantDetail  bool
-	}{
-		{"public", "", false},
-		{"invalid token", "bogus", false},
-		{"admin", token, true},
+	for _, tc := range []struct{ name, token string }{
+		{"public", ""},
+		{"invalid token", "bogus"},
+		{"admin", h.login()},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			r := h.do(http.MethodGet, "/services/svc1/results", tc.token, "")
 			h.mustStatus(r, http.StatusOK, "GET results")
-			if leaked := bytes.Contains(r.body, []byte("super-secret-credential-leak")); leaked != tc.wantDetail {
-				t.Errorf("detail in body = %v, want %v: %s", leaked, tc.wantDetail, r.body)
-			}
 			rows := r.array(t)
 			if len(rows) != 1 {
 				t.Fatalf("rows = %v, want 1", rows)
 			}
-			want := []string{"id", "latency_ms", "success", "timestamp"}
-			if tc.wantDetail {
-				want = []string{"detail", "id", "latency_ms", "success", "timestamp"}
-			}
+			want := []string{"detail", "id", "latency_ms", "round", "success", "timestamp"}
 			if got := keys(rows[0]); !slices.Equal(got, want) {
 				t.Errorf("keys = %v, want %v", got, want)
 			}
-			if rows[0]["timestamp"] != "2026-10-15T12:00:00Z" || rows[0]["success"] != false ||
+			if rows[0]["detail"] != "connection refused" || rows[0]["round"] != 3.0 ||
+				rows[0]["timestamp"] != "2026-10-15T12:00:00Z" || rows[0]["success"] != false ||
 				rows[0]["latency_ms"] != 5.0 {
 				t.Errorf("row = %v", rows[0])
 			}
@@ -693,6 +696,57 @@ func TestEvents_ShapeAndDetail(t *testing.T) {
 	}
 }
 
+// Event detail is admin-only for every event type: there is no per-type
+// carve-out, not even for service up/down transitions.
+func TestEvents_DetailStaysAdminOnlyForEveryType(t *testing.T) {
+	h := newHarness(t, okCheck, "svc1")
+	types := []string{
+		"service_up", "service_down",
+		engine.EventEngineStarted, engine.EventEngineStopped,
+		engine.EventScoringPaused, engine.EventScoringResumed,
+		engine.EventRoutineStarted, engine.EventRoutineStopped,
+		engine.EventRoutineRestarted, engine.EventRoutineStartFailed,
+		engine.EventServiceScoringPaused, engine.EventServiceScoringResumed,
+		engine.EventServiceAdded, engine.EventServiceRemoved,
+		engine.EventConfigReloaded, engine.EventConfigSnapshotFailed,
+		engine.EventCountdownChanged,
+	}
+	for _, typ := range types {
+		if err := h.st.InsertEvent(store.Event{SessionID: h.sess.ID, Level: "info", Actor: "system",
+			Type: typ, Message: typ, Detail: "detail of " + typ}); err != nil {
+			t.Fatalf("InsertEvent: %v", err)
+		}
+	}
+	token := h.login()
+
+	for _, tc := range []struct {
+		name, token string
+		wantDetail  bool
+	}{
+		{"public", "", false},
+		{"invalid token", "bogus", false},
+		{"admin", token, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := h.do(http.MethodGet, "/events?limit=500", tc.token, "")
+			h.mustStatus(r, http.StatusOK, "GET /events")
+			events := r.array(t)
+			if len(events) != len(types) {
+				t.Fatalf("got %d events, want %d", len(events), len(types))
+			}
+			for _, ev := range events {
+				detail, has := ev["detail"]
+				if has != tc.wantDetail {
+					t.Errorf("event %v: detail present = %v, want %v", ev["type"], has, tc.wantDetail)
+				}
+				if has && detail != "detail of "+ev["type"].(string) {
+					t.Errorf("event %v: detail = %v", ev["type"], detail)
+				}
+			}
+		})
+	}
+}
+
 func TestEvents_Pagination(t *testing.T) {
 	h := newHarness(t, okCheck, "svc1")
 	base := time.Now().UTC().Add(-time.Hour)
@@ -754,13 +808,349 @@ func TestParseLimitAndBefore(t *testing.T) {
 	}
 }
 
+func TestCountdown_SetsAndReturnsStatus(t *testing.T) {
+	h := newHarness(t, okCheck, "svc1")
+	token := h.login()
+	for _, tc := range []struct{ name, target, want string }{
+		{"UTC", "2026-10-17T17:00:00Z", "2026-10-17T17:00:00Z"},
+		{"offset is normalized to UTC", "2026-10-17T13:30:00-04:00", "2026-10-17T17:30:00Z"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := h.do(http.MethodPost, "/countdown", token, `{"target":"`+tc.target+`"}`)
+			h.mustStatus(r, http.StatusOK, "POST /countdown")
+			if got := r.object(t)["countdown_target"]; got != tc.want {
+				t.Errorf("response countdown_target = %v, want %s", got, tc.want)
+			}
+			if got := h.do(http.MethodGet, "/status", "", "").object(t)["countdown_target"]; got != tc.want {
+				t.Errorf("GET /status countdown_target = %v, want %s", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestCountdown_NullTargetClearsIt(t *testing.T) {
+	h := newHarness(t, okCheck, "svc1")
+	token := h.login()
+	h.mustStatus(h.do(http.MethodPost, "/countdown", token, `{"target":"2026-10-17T17:00:00Z"}`),
+		http.StatusOK, "set countdown")
+
+	r := h.do(http.MethodPost, "/countdown", token, `{"target":null}`)
+	h.mustStatus(r, http.StatusOK, "clear countdown")
+	if got, ok := r.object(t)["countdown_target"]; ok {
+		t.Errorf("response countdown_target = %v after clearing, want it absent", got)
+	}
+	if got, ok := h.do(http.MethodGet, "/status", "", "").object(t)["countdown_target"]; ok {
+		t.Errorf("GET /status countdown_target = %v after clearing, want it absent", got)
+	}
+}
+
+func TestCountdown_RejectsABadBody(t *testing.T) {
+	h := newHarness(t, okCheck, "svc1")
+	token := h.login()
+	for _, body := range []string{
+		`{"target":"not a time"}`,
+		`{"target":"2026-10-17 17:00:00"}`,
+		`{"target":1760720400}`,
+		`{"when":"2026-10-17T17:00:00Z"}`,
+		``,
+	} {
+		t.Run(body, func(t *testing.T) {
+			h.mustStatus(h.do(http.MethodPost, "/countdown", token, body), http.StatusBadRequest, "POST /countdown "+body)
+		})
+	}
+	// None of them changed anything.
+	if got, ok := h.do(http.MethodGet, "/status", "", "").object(t)["countdown_target"]; ok {
+		t.Errorf("countdown_target = %v after rejected requests, want it absent", got)
+	}
+}
+
+func TestGetConfig_ReturnsRawTextAndHash(t *testing.T) {
+	h := newHarness(t, okCheck, "svc1")
+	token := h.login()
+	res := h.do(http.MethodGet, "/config", token, "")
+	h.mustStatus(res, http.StatusOK, "get config")
+	body := res.object(t)
+	if body["text"] == "" || body["hash"] == "" {
+		t.Fatalf("expected non-empty text and hash, got %#v", body)
+	}
+}
+
+func TestConfigStatus_StaleAfterASaveBeforeReload(t *testing.T) {
+	h := newHarness(t, okCheck, "svc1")
+	token := h.login()
+	get := h.do(http.MethodGet, "/config", token, "").object(t)
+	saved := h.do(http.MethodPost, "/config", token, fmt.Sprintf(`{"text": %q, "expected_hash": %q}`,
+		configYAML("svc1", "svc2"), get["hash"]))
+	h.mustStatus(saved, http.StatusOK, "save config")
+
+	status := h.do(http.MethodGet, "/config/status", token, "").object(t)
+	if status["stale"] != true {
+		t.Fatalf("expected stale=true right after a save with no reload yet, got %#v", status)
+	}
+}
+
+// TestSaveConfig_ConcurrentSavesWithTheSameExpectedHashOnlyOneWins guards
+// against a TOCTOU race: the hash check, validation and write must not
+// interleave across two concurrent requests, or both can read the same
+// "current" hash and both succeed, the second silently overwriting the
+// first -- exactly what the conflict check exists to prevent.
+func TestSaveConfig_ConcurrentSavesWithTheSameExpectedHashOnlyOneWins(t *testing.T) {
+	h := newHarness(t, okCheck, "svc1")
+	token := h.login()
+	get := h.do(http.MethodGet, "/config", token, "").object(t)
+	hash := get["hash"].(string)
+
+	var wg sync.WaitGroup
+	statuses := make([]int, 2)
+	for i := range 2 {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			body := fmt.Sprintf(`{"text": %q, "expected_hash": %q}`, configYAML("svc1", fmt.Sprintf("svc-race-%d", i)), hash)
+			statuses[i] = h.do(http.MethodPost, "/config", token, body).status
+		}(i)
+	}
+	wg.Wait()
+
+	oks, conflicts := 0, 0
+	for _, s := range statuses {
+		switch s {
+		case http.StatusOK:
+			oks++
+		case http.StatusConflict:
+			conflicts++
+		default:
+			t.Errorf("unexpected status %d", s)
+		}
+	}
+	if oks != 1 || conflicts != 1 {
+		t.Fatalf("statuses = %v, want exactly one 200 and one 409", statuses)
+	}
+}
+
+func TestSaveConfig_RejectsAStaleExpectedHash(t *testing.T) {
+	h := newHarness(t, okCheck, "svc1")
+	token := h.login()
+	res := h.do(http.MethodPost, "/config", token, `{"text": "session_name: x", "expected_hash": "not-the-real-hash"}`)
+	h.mustStatus(res, http.StatusConflict, "save with stale hash")
+}
+
+func TestSaveConfig_RejectsInvalidYAMLAndWritesNothing(t *testing.T) {
+	h := newHarness(t, okCheck, "svc1")
+	token := h.login()
+	get := h.do(http.MethodGet, "/config", token, "").object(t)
+	before, err := os.ReadFile(h.configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	res := h.do(http.MethodPost, "/config", token, fmt.Sprintf(`{"text": "not: valid: yaml: at all:", "expected_hash": %q}`, get["hash"]))
+	h.mustStatus(res, http.StatusBadRequest, "save invalid yaml")
+	after, err := os.ReadFile(h.configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(before) != string(after) {
+		t.Fatal("an invalid save must not touch the file on disk")
+	}
+}
+
+// TestSaveConfig_AcceptsABodyLargerThanTheGenericLimit guards against
+// POST /config sharing the generic maxBodyBytes limit (4KiB): a real
+// config.yaml with more than a handful of services routinely exceeds that
+// (config.example.yaml itself is already close to it).
+func TestSaveConfig_AcceptsABodyLargerThanTheGenericLimit(t *testing.T) {
+	h := newHarness(t, okCheck, "svc1")
+	token := h.login()
+	get := h.do(http.MethodGet, "/config", token, "").object(t)
+
+	names := make([]string, 40)
+	for i := range names {
+		names[i] = fmt.Sprintf("svc%d", i)
+	}
+	big := configYAML(names...)
+	if len(big) <= 4<<10 {
+		t.Fatalf("test fixture is %d bytes, want more than the generic 4KiB limit to actually exercise it", len(big))
+	}
+	body, err := json.Marshal(map[string]string{"text": big, "expected_hash": get["hash"].(string)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	res := h.do(http.MethodPost, "/config", token, string(body))
+	h.mustStatus(res, http.StatusOK, "save a large config")
+}
+
+// TestSaveConfig_RejectsValidYAMLThatFailsConfigValidation pins Review Focus
+// item 4: syntactically valid YAML that fails the engine's own config
+// validation (as opposed to a YAML parse error) must still answer 400 with
+// the real validation error, and must leave the file untouched.
+func TestSaveConfig_RejectsValidYAMLThatFailsConfigValidation(t *testing.T) {
+	h := newHarness(t, okCheck, "svc1")
+	token := h.login()
+	get := h.do(http.MethodGet, "/config", token, "").object(t)
+	before, err := os.ReadFile(h.configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	badYAML := strings.Replace(configYAML("svc1"), "check_type: tcp_connect", "check_type: bogus_check", 1)
+	res := h.do(http.MethodPost, "/config", token, fmt.Sprintf(`{"text": %q, "expected_hash": %q}`, badYAML, get["hash"]))
+	h.mustStatus(res, http.StatusBadRequest, "save config with an unknown check_type")
+	if msg, _ := res.object(t)["error"].(string); !strings.Contains(msg, "bogus_check") {
+		t.Errorf("error = %q, want it to name the bad check_type", msg)
+	}
+
+	after, err := os.ReadFile(h.configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(before) != string(after) {
+		t.Fatal("a save that fails config validation must not touch the file on disk")
+	}
+}
+
+func TestAdjustScore_RejectsAnUnknownSide(t *testing.T) {
+	h := newHarness(t, okCheck, "svc1")
+	token := h.login()
+	res := h.do(http.MethodPost, "/teams/manual/adjust", token, `{"points": 10, "reason": "x"}`)
+	h.mustStatus(res, http.StatusBadRequest, "adjust unknown side")
+}
+
+func TestAdjustScore_RejectsPointsBeyondTheMax(t *testing.T) {
+	h := newHarness(t, okCheck, "svc1")
+	token := h.login()
+	res := h.do(http.MethodPost, "/teams/blue/adjust", token,
+		fmt.Sprintf(`{"points": %d, "reason": "x"}`, engine.MaxAdjustmentPoints+1))
+	h.mustStatus(res, http.StatusBadRequest, "adjust beyond the max")
+}
+
+func TestAdjustScore_RejectsZeroPoints(t *testing.T) {
+	h := newHarness(t, okCheck, "svc1")
+	token := h.login()
+	h.mustStatus(h.do(http.MethodPost, "/scoring/resume", token, ""), http.StatusOK, "resume scoring")
+	res := h.do(http.MethodPost, "/teams/blue/adjust", token, `{"points": 0, "reason": "x"}`)
+	h.mustStatus(res, http.StatusBadRequest, "adjust zero points")
+}
+
+func TestAdjustScore_ConflictWhenScoringNotPaused(t *testing.T) {
+	h := newHarness(t, okCheck, "svc1")
+	token := h.login()
+	h.mustStatus(h.do(http.MethodPost, "/scoring/resume", token, ""), http.StatusOK, "resume scoring")
+	res := h.do(http.MethodPost, "/teams/blue/adjust", token, `{"points": 10, "reason": "x"}`)
+	h.mustStatus(res, http.StatusConflict, "adjust while not paused")
+}
+
+func TestAdjustScore_SucceedsWhilePaused(t *testing.T) {
+	h := newHarness(t, okCheck, "svc1")
+	token := h.login()
+	res := h.do(http.MethodPost, "/teams/blue/adjust", token, `{"points": 10, "reason": "x"}`)
+	h.mustStatus(res, http.StatusOK, "adjust while paused")
+	if got := res.object(t)["blue_score"]; got != 1010.0 {
+		t.Errorf("blue_score = %v, want 1010", got)
+	}
+}
+
+func TestBackup_ConflictWhileEngineIsRunning(t *testing.T) {
+	h := newHarness(t, okCheck, "svc1")
+	token := h.login()
+	h.mustStatus(h.do(http.MethodPost, "/engine/start", token, ""), http.StatusOK, "start engine")
+	res := h.do(http.MethodPost, "/backup", token, "")
+	h.mustStatus(res, http.StatusConflict, "backup while running")
+}
+
+func TestBackup_SucceedsWhileStoppedAndReportsThePath(t *testing.T) {
+	h := newHarness(t, okCheck, "svc1")
+	token := h.login()
+	res := h.do(http.MethodPost, "/backup", token, "")
+	h.mustStatus(res, http.StatusOK, "backup while stopped")
+	if res.object(t)["backup_path"] == "" {
+		t.Fatal("expected a non-empty backup_path")
+	}
+}
+
+func TestResetRound_ConflictWhileEngineIsRunning(t *testing.T) {
+	h := newHarness(t, okCheck, "svc1")
+	token := h.login()
+	h.mustStatus(h.do(http.MethodPost, "/engine/start", token, ""), http.StatusOK, "start engine")
+	res := h.do(http.MethodPost, "/db/reset-round", token, `{"backup": true}`)
+	h.mustStatus(res, http.StatusConflict, "reset while running")
+}
+
+func TestResetRound_SucceedsWhileStopped(t *testing.T) {
+	h := newHarness(t, okCheck, "svc1")
+	token := h.login()
+	res := h.do(http.MethodPost, "/db/reset-round", token, `{"backup": true}`)
+	h.mustStatus(res, http.StatusOK, "reset while stopped")
+	if res.object(t)["backup_path"] == "" {
+		t.Fatal("expected a non-empty backup_path")
+	}
+}
+
+func TestResetRound_WithoutBackupOmitsPath(t *testing.T) {
+	h := newHarness(t, okCheck, "svc1")
+	token := h.login()
+	res := h.do(http.MethodPost, "/db/reset-round", token, `{"backup": false}`)
+	h.mustStatus(res, http.StatusOK, "reset without backup")
+	if _, ok := res.object(t)["backup_path"]; ok {
+		t.Errorf(`expected "backup_path" to be absent, got %v`, res.object(t)["backup_path"])
+	}
+}
+
+func TestAtomicWriteFile_WritesContentAndPermissions(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	if err := atomicWriteFile(path, []byte("hello"), 0o600); err != nil {
+		t.Fatalf("atomicWriteFile: %v", err)
+	}
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "hello" {
+		t.Errorf("content = %q, want %q", got, "hello")
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0o600 {
+		t.Errorf("mode = %v, want 0600", info.Mode().Perm())
+	}
+}
+
+// TestAtomicWriteFile_FailureLeavesTheOriginalUntouched pins the fix for
+// Important item 5: a failed save must never leave config.yaml truncated or
+// partially written. Simulated here by making the directory unwritable so
+// the temp file can't even be created, before anything touches the
+// original.
+func TestAtomicWriteFile_FailureLeavesTheOriginalUntouched(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	if err := os.WriteFile(path, []byte("original"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(dir, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	defer os.Chmod(dir, 0o700) // restore so t.TempDir() can clean up
+
+	if err := atomicWriteFile(path, []byte("new content"), 0o600); err == nil {
+		t.Fatal("expected atomicWriteFile to fail when it cannot create a temp file in the directory")
+	}
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "original" {
+		t.Errorf("content after a failed write = %q, want the untouched original %q", got, "original")
+	}
+}
+
 func TestReload(t *testing.T) {
 	h := newHarness(t, okCheck, "svc1")
 	token := h.login()
 
 	r := h.do(http.MethodPost, "/reload", token, "")
 	h.mustStatus(r, http.StatusOK, "no-op reload")
-	if got := string(bytes.TrimSpace(r.body)); got != `{"added":[],"removed":[],"failed":[]}` {
+	if got := string(bytes.TrimSpace(r.body)); got != `{"added":[],"removed":[],"updated":[],"failed":[]}` {
 		t.Errorf("no-op reload body = %s, want empty lists", got)
 	}
 
@@ -823,7 +1213,6 @@ func TestStartFailures_AreReportedInResponses(t *testing.T) {
 	h.writeConfig(configYAML("svc1") + `  - name: svc2
     host: 127.0.0.1
     check_type: tcp_connect
-    interval_seconds: 1
     points_per_failure: 10
     params: {prot: 9}
 `)
@@ -876,7 +1265,6 @@ func TestStartFailures_AreReportedInResponses(t *testing.T) {
 		h.writeConfig(configYAML("svc1", "svc2") + `  - name: svc3
     host: 127.0.0.1
     check_type: http
-    interval_seconds: 1
     points_per_failure: 10
     params: {port: 80}
 `)
@@ -947,5 +1335,65 @@ func TestInternalErrors_PublicGeneric_AdminVerbose(t *testing.T) {
 	h.mustStatus(r, http.StatusInternalServerError, "POST /engine/start")
 	if msg, _ := r.object(t)["error"].(string); !strings.Contains(msg, "engine") {
 		t.Errorf("admin 500 error = %q, want the underlying cause", msg)
+	}
+}
+
+func TestFallback_ServesUnmatchedGETsOnly(t *testing.T) {
+	h := newHarness(t, okCheck, "svc1")
+	fallback := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		_, _ = io.WriteString(w, "frontend")
+	})
+	a := auth.New(testUsername, testHash)
+	srv := httptest.NewServer(NewServer(h.e, h.st, h.sess.ID, a, "", WithFallback(fallback)))
+	t.Cleanup(srv.Close)
+
+	tests := []struct {
+		method, path string
+		wantStatus   int
+		wantFallback bool
+	}{
+		{http.MethodGet, "/", http.StatusOK, true},
+		{http.MethodGet, "/admin", http.StatusOK, true},
+		{http.MethodGet, "/assets/index.js", http.StatusOK, true},
+		{http.MethodHead, "/admin", http.StatusOK, true},
+		// API routes keep answering as before, errors included.
+		{http.MethodGet, "/status", http.StatusOK, false},
+		{http.MethodPost, "/status", http.StatusMethodNotAllowed, false},
+		{http.MethodGet, "/engine/start", http.StatusMethodNotAllowed, false},
+		{http.MethodPost, "/engine/start", http.StatusUnauthorized, false},
+		// Only reads fall back: a write to an unknown path is still a JSON 404.
+		{http.MethodPost, "/admin", http.StatusNotFound, false},
+		{http.MethodDelete, "/no/such/route", http.StatusNotFound, false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.method+" "+tc.path, func(t *testing.T) {
+			req, err := http.NewRequest(tc.method, srv.URL+tc.path, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			resp, err := http.DefaultClient.Do(req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer resp.Body.Close()
+			body, err := io.ReadAll(resp.Body)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if resp.StatusCode != tc.wantStatus {
+				t.Errorf("status = %d, want %d (body %s)", resp.StatusCode, tc.wantStatus, body)
+			}
+			wantType := "application/json"
+			if tc.wantFallback {
+				wantType = "text/html"
+			}
+			if ct := resp.Header.Get("Content-Type"); ct != wantType {
+				t.Errorf("Content-Type = %q, want %q", ct, wantType)
+			}
+			if tc.wantFallback && tc.method == http.MethodGet && string(body) != "frontend" {
+				t.Errorf("body = %q, want the fallback's", body)
+			}
+		})
 	}
 }

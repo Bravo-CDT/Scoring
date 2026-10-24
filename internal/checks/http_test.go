@@ -2,6 +2,7 @@ package checks
 
 import (
 	"context"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -104,6 +105,30 @@ func TestHTTP_ContentMismatch(t *testing.T) {
 	}
 	if strings.Contains(res.Detail, "SecretMarker") {
 		t.Errorf("Detail = %q leaks the expected content string", res.Detail)
+	}
+}
+
+func TestHTTP_FailureDetailOmitsQueryString(t *testing.T) {
+	// Point the check at a port nothing listens on, so it fails in the
+	// request itself, the error path that echoes the URL.
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	host, port := splitHostPortInt(t, ln.Addr().String())
+	ln.Close() // now nothing is listening on this port
+
+	res := HTTP(context.Background(), host, map[string]any{
+		"port": port, "path": "/health?api_key=hunter2",
+	})
+	if res.Success {
+		t.Fatal("expected failure against a closed port")
+	}
+	if strings.Contains(res.Detail, "hunter2") || strings.Contains(res.Detail, "api_key") || strings.Contains(res.Detail, "?") {
+		t.Errorf("Detail = %q leaks the path's query string", res.Detail)
+	}
+	if !strings.Contains(res.Detail, "/health") {
+		t.Errorf("Detail = %q, expected it to still name the path being checked", res.Detail)
 	}
 }
 
@@ -228,5 +253,61 @@ func TestHTTP_RespectsContextDeadline_HungBody(t *testing.T) {
 	}
 	if elapsed > 2*time.Second {
 		t.Errorf("HTTP took %v, expected it to respect the ~50ms context deadline", elapsed)
+	}
+}
+
+// newTLSServer starts a self-signed HTTPS test server and registers its
+// shutdown with t.Cleanup.
+func newTLSServer(t *testing.T, h http.HandlerFunc) (string, int) {
+	t.Helper()
+	ts := httptest.NewTLSServer(h)
+	t.Cleanup(ts.Close)
+	return hostPort(t, ts)
+}
+
+func TestHTTP_HTTPSWithServerName(t *testing.T) {
+	var gotHost string
+	host, port := newTLSServer(t, func(w http.ResponseWriter, r *http.Request) {
+		gotHost = r.Host
+	})
+
+	res := HTTP(context.Background(), host, map[string]any{
+		"port":                 port,
+		"https":                true,
+		"server_name":          "orderwindow.krusty.krab",
+		"insecure_skip_verify": true,
+	})
+	if !res.Success {
+		t.Fatalf("expected success, got %q", res.Detail)
+	}
+	if gotHost != "orderwindow.krusty.krab" {
+		t.Errorf("Host = %q, want %q", gotHost, "orderwindow.krusty.krab")
+	}
+}
+
+func TestHTTP_HTTPSVerifiesCertByDefault(t *testing.T) {
+	host, port := newTLSServer(t, func(http.ResponseWriter, *http.Request) {})
+
+	res := HTTP(context.Background(), host, map[string]any{
+		"port":        port,
+		"https":       true,
+		"server_name": "orderwindow.krusty.krab",
+	})
+	if res.Success {
+		t.Fatal("expected failure against a self-signed certificate")
+	}
+	if !strings.Contains(res.Detail, "certificate") {
+		t.Errorf("Detail = %q, expected it to mention the certificate", res.Detail)
+	}
+}
+
+func TestHTTP_HTTPSParamTypes(t *testing.T) {
+	for _, params := range []map[string]any{
+		{"port": 443, "https": "yes"},
+		{"port": 443, "server_name": 5},
+	} {
+		if err := ValidateParams("http", params); err == nil {
+			t.Errorf("ValidateParams(%v) = nil, want an error", params)
+		}
 	}
 }

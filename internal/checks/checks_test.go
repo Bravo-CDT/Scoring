@@ -59,7 +59,7 @@ func TestRegistry_RegisterReplaces(t *testing.T) {
 
 func TestNewDefaultRegistry_HasBuiltins(t *testing.T) {
 	r := NewDefaultRegistry()
-	for _, name := range []string{"tcp_connect", "http"} {
+	for _, name := range []string{"tcp_connect", "http", "http_exclusive", "postgres", "smb", "smtp", "dns", "ldap", "openfire", "script"} {
 		if _, ok := r.Get(name); !ok {
 			t.Errorf("expected default registry to include %q", name)
 		}
@@ -68,7 +68,7 @@ func TestNewDefaultRegistry_HasBuiltins(t *testing.T) {
 
 func TestBuiltinTypes(t *testing.T) {
 	got := BuiltinTypes()
-	if want := []string{"http", "tcp_connect"}; !slices.Equal(got, want) {
+	if want := []string{"dns", "http", "http_exclusive", "ldap", "openfire", "postgres", "script", "smb", "smtp", "tcp_connect"}; !slices.Equal(got, want) {
 		t.Errorf("BuiltinTypes() = %v, want %v", got, want)
 	}
 	// Every built-in type is in the default registry, so config validation and
@@ -111,6 +111,37 @@ func TestValidateParams(t *testing.T) {
 		{"http expect_status too high", "http", map[string]any{"port": 80, "expect_status": 600}, []string{`"expect_status"`, "599"}},
 		{"http expect_contains wrong type", "http", map[string]any{"port": 80, "expect_contains": 7}, []string{`"expect_contains"`, "string"}},
 
+		{"http_exclusive valid", "http_exclusive", map[string]any{"port": 80, "expect_contains_ci": "wordpress", "closed_port": 8080}, nil},
+		{"http_exclusive missing port", "http_exclusive", map[string]any{"expect_contains_ci": "wordpress", "closed_port": 8080}, []string{`"port"`, "missing"}},
+		{"http_exclusive missing expect_contains_ci", "http_exclusive", map[string]any{"port": 80, "closed_port": 8080}, []string{`"expect_contains_ci"`, "missing"}},
+		{"http_exclusive missing closed_port", "http_exclusive", map[string]any{"port": 80, "expect_contains_ci": "wordpress"}, []string{`"closed_port"`, "missing"}},
+		{"http_exclusive closed_port out of range", "http_exclusive", map[string]any{"port": 80, "expect_contains_ci": "wordpress", "closed_port": 70000}, []string{`"closed_port"`, "65535"}},
+		{"http_exclusive misspelled param", "http_exclusive", map[string]any{"port": 80, "expect_contains_ci": "wordpress", "closed_port": 8080, "expect_contain_ci": "x"}, []string{`"expect_contain_ci"`, "unknown"}},
+
+		{"postgres valid", "postgres", map[string]any{"port": 5432, "user": "mrkrabs", "password": "Patty321!", "dbname": "KrustySafe"}, nil},
+		{"postgres missing port", "postgres", map[string]any{"user": "mrkrabs", "password": "Patty321!", "dbname": "KrustySafe"}, []string{`"port"`, "missing"}},
+		{"postgres missing user", "postgres", map[string]any{"port": 5432, "password": "Patty321!", "dbname": "KrustySafe"}, []string{`"user"`, "missing"}},
+		{"postgres missing password", "postgres", map[string]any{"port": 5432, "user": "mrkrabs", "dbname": "KrustySafe"}, []string{`"password"`, "missing"}},
+		{"postgres missing dbname", "postgres", map[string]any{"port": 5432, "user": "mrkrabs", "password": "Patty321!"}, []string{`"dbname"`, "missing"}},
+		{"postgres misspelled param", "postgres", map[string]any{"port": 5432, "user": "mrkrabs", "password": "x", "dbname": "x", "dbanme": "x"}, []string{`"dbanme"`, "unknown"}},
+
+		{"smb valid", "smb", map[string]any{"port": 445, "user": "mrkrabs", "password": "Patty321!", "share": "sambashare"}, nil},
+		{"smb valid with optional params", "smb", map[string]any{"port": 445, "user": "mrkrabs", "password": "Patty321!", "domain": "KRUSTYKRAB", "share": "sambashare", "expect_share": "sambashare", "expect_file": "secretformula.txt"}, nil},
+		{"smb missing port", "smb", map[string]any{"user": "mrkrabs", "password": "Patty321!", "share": "sambashare"}, []string{`"port"`, "missing"}},
+		{"smb missing user", "smb", map[string]any{"port": 445, "password": "Patty321!", "share": "sambashare"}, []string{`"user"`, "missing"}},
+		{"smb missing password", "smb", map[string]any{"port": 445, "user": "mrkrabs", "share": "sambashare"}, []string{`"password"`, "missing"}},
+		{"smb missing share", "smb", map[string]any{"port": 445, "user": "mrkrabs", "password": "Patty321!"}, []string{`"share"`, "missing"}},
+		{"smb misspelled param", "smb", map[string]any{"port": 445, "user": "mrkrabs", "password": "x", "share": "s", "shre": "s"}, []string{`"shre"`, "unknown"}},
+
+		{"smtp valid", "smtp", map[string]any{"port": 587, "user": "mrkrabs", "password": "Patty321!"}, nil},
+		{"smtp valid with insecure_skip_verify", "smtp", map[string]any{"port": 587, "user": "mrkrabs", "password": "Patty321!", "insecure_skip_verify": true}, nil},
+		{"smtp missing port", "smtp", map[string]any{"user": "mrkrabs", "password": "Patty321!"}, []string{`"port"`, "missing"}},
+		{"smtp missing user", "smtp", map[string]any{"port": 587, "password": "Patty321!"}, []string{`"user"`, "missing"}},
+		{"smtp empty user", "smtp", map[string]any{"port": 587, "user": "", "password": "Patty321!"}, []string{`"user"`, "missing"}},
+		{"smtp missing password", "smtp", map[string]any{"port": 587, "user": "mrkrabs"}, []string{`"password"`, "missing"}},
+		{"smtp misspelled param", "smtp", map[string]any{"port": 587, "user": "mrkrabs", "password": "x", "pasword": "x"}, []string{`"pasword"`, "unknown"}},
+		{"smtp insecure_skip_verify wrong type", "smtp", map[string]any{"port": 587, "user": "mrkrabs", "password": "x", "insecure_skip_verify": "yes"}, []string{`"insecure_skip_verify"`, "boolean"}},
+
 		{"unknown check type", "ftp", map[string]any{"port": 21}, []string{`"ftp"`}},
 	}
 	for _, tt := range tests {
@@ -146,9 +177,9 @@ func TestValidateParams(t *testing.T) {
 }
 
 func TestBuiltins_RejectEmptyHost(t *testing.T) {
-	for name, fn := range map[string]CheckFunc{"tcp_connect": TCPConnect, "http": HTTP} {
+	for name, fn := range map[string]CheckFunc{"tcp_connect": TCPConnect, "http": HTTP, "http_exclusive": HTTPExclusive, "postgres": Postgres, "smb": SMB, "smtp": SMTP, "dns": DNS, "ldap": LDAP, "openfire": Openfire, "script": Script} {
 		t.Run(name, func(t *testing.T) {
-			res := fn(context.Background(), "", map[string]any{"port": 80})
+			res := fn(context.Background(), "", map[string]any{"port": 80, "user": "u", "password": "p", "dbname": "d", "share": "s", "name": "n"})
 			if res.Success {
 				t.Fatal("expected failure for an empty host")
 			}

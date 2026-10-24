@@ -7,6 +7,7 @@
 package app
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"net/http"
@@ -37,12 +38,14 @@ type Options struct {
 	// directory must already exist.
 	DBPath string
 
+	// WebDir is the built frontend (web/dist) to serve alongside the API:
+	// any GET or HEAD that matches no API route is answered from it (see
+	// NewStaticHandler). Empty means serve only the API.
+	WebDir string
+
 	// Registry supplies the check implementations. Nil means
 	// checks.NewDefaultRegistry().
 	Registry *checks.Registry
-	// MaxStagger, if set, overrides the scheduler's bound on the random delay
-	// before each routine's first check (zero removes it).
-	MaxStagger *time.Duration
 }
 
 // App is a fully wired scoring engine. The engine starts stopped and scoring
@@ -54,13 +57,20 @@ type App struct {
 	Store   *store.Store
 	Engine  *engine.Engine
 	Auth    *auth.Auth
-	// Handler serves the full HTTP API.
+	// Handler serves the full HTTP API, and the frontend if Options.WebDir
+	// is set.
 	Handler http.Handler
+
+	// stopRounds cancels the scheduler's round loop, and roundsDone is closed
+	// once the loop has exited.
+	stopRounds context.CancelFunc
+	roundsDone <-chan struct{}
 }
 
 // New loads and validates the config, opens the store, syncs the session's
-// services with the config, and builds the stack on top. On error nothing is
-// left open.
+// services with the config, builds the stack on top, and starts the
+// scheduler's round loop (which checks nothing until an admin starts the
+// engine). On error nothing is left open or running.
 func New(opts Options) (*App, error) {
 	if opts.ConfigPath == "" || opts.DBPath == "" {
 		return nil, errors.New("app: config path and database path are required")
@@ -104,17 +114,8 @@ func build(opts Options, cfg *config.Config, st *store.Store) (*App, error) {
 	if registry == nil {
 		registry = checks.NewDefaultRegistry()
 	}
-	// The scorer and scheduler refer to each other: the scheduler reports into
-	// the scorer, and the scorer's mass-failure check counts only services the
-	// scheduler is running. The closure reads sched only once results flow,
-	// which needs the scheduler, so it is always set by then.
-	var sched *scheduler.Scheduler
-	running := func(serviceID int64) bool { return sched.IsRunning(serviceID) }
-	sc := scorer.New(st, sess.ID, cfg.MassFailureFraction, scorer.WithRunning(running))
-	sched = scheduler.New(registry, sc, opts.ConfigPath)
-	if opts.MaxStagger != nil {
-		sched.SetMaxStagger(*opts.MaxStagger)
-	}
+	sc := scorer.New(st, sess.ID)
+	sched := scheduler.New(registry, sc, opts.ConfigPath, time.Duration(cfg.RoundIntervalSeconds)*time.Second)
 	eng := engine.New(st, sess, sched, opts.ConfigPath)
 
 	// Sync the session's services with the config through the same path as
@@ -142,25 +143,47 @@ func build(opts Options, cfg *config.Config, st *store.Store) (*App, error) {
 		return nil, fmt.Errorf("recording process start: %w", err)
 	}
 
+	// Round numbering carries on from the last round this session recorded,
+	// so a restart never reuses a round number.
+	firstRound, err := st.NextRoundNumber(sess.ID)
+	if err != nil {
+		return nil, fmt.Errorf("finding the next round number: %w", err)
+	}
+
 	au := auth.New(cfg.Admin.Username, cfg.Admin.PasswordHash)
+	var apiOpts []api.Option
+	if opts.WebDir != "" {
+		apiOpts = append(apiOpts, api.WithFallback(NewStaticHandler(opts.WebDir)))
+	}
+	// Started last, so no error path above leaves it running.
+	ctx, cancel := context.WithCancel(context.Background())
+	roundsDone := sched.Run(ctx, firstRound)
 	return &App{
-		Config:  cfg,
-		Session: sess,
-		Store:   st,
-		Engine:  eng,
-		Auth:    au,
-		Handler: api.NewServer(eng, st, sess.ID, au, opts.ConfigPath),
+		Config:     cfg,
+		Session:    sess,
+		Store:      st,
+		Engine:     eng,
+		Auth:       au,
+		Handler:    api.NewServer(eng, st, sess.ID, au, opts.ConfigPath, apiOpts...),
+		stopRounds: cancel,
+		roundsDone: roundsDone,
 	}, nil
 }
 
-// Close stops the engine, waiting for every check routine to exit, then closes
-// the store. Call it only after the HTTP server has stopped handling requests.
+// Close stops the round loop, waiting for it to exit (a round in progress is
+// abandoned, not recorded), then stops the engine and closes the store. Call
+// it only after the HTTP server has stopped handling requests.
 //
 // Stopping the engine here persists engine_state=stopped and logs an
 // engine_stopped event, attributed to the system, if it was running; the store
 // would force the same state on the next start anyway, so this just makes the
 // shutdown explicit in the event history.
 func (a *App) Close() error {
+	// The loop records into the store, so it must be gone before the store
+	// closes.
+	a.stopRounds()
+	<-a.roundsDone
+
 	stopErr := a.Engine.StopAs(engine.ActorSystem)
 	if stopErr != nil {
 		stopErr = fmt.Errorf("stopping engine: %w", stopErr)

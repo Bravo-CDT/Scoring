@@ -31,7 +31,7 @@ var realHash = func() string {
 const validYAML = `
 session_name: "test-session"
 starting_score: 1000
-mass_failure_fraction: 0.5
+round_interval_seconds: 30
 
 admin:
   username: admin
@@ -41,7 +41,6 @@ services:
   - name: apache-web
     host: 10.0.1.10
     check_type: http
-    interval_seconds: 60
     points_per_failure: 10
     params:
       port: 80
@@ -52,17 +51,17 @@ services:
   - name: telnet-win
     host: 10.0.2.15
     check_type: tcp_connect
-    interval_seconds: 30
     points_per_failure: 5
     params:
       port: 23
 `
 
-// minimalYAML is the smallest valid config: no mass_failure_fraction, one
+// minimalYAML is the smallest valid config: one
 // service with only its required param.
 const minimalYAML = `
 session_name: "minimal"
 starting_score: 500
+round_interval_seconds: 60
 admin:
   username: admin
   password_hash: ${TEST_ADMIN_HASH}
@@ -70,7 +69,6 @@ services:
   - name: svc1
     host: 127.0.0.1
     check_type: tcp_connect
-    interval_seconds: 60
     points_per_failure: 10
     params: {port: 22}
 `
@@ -93,6 +91,22 @@ func setHash(t *testing.T) {
 	t.Setenv(hashEnvVar, realHash)
 }
 
+func TestParse_SameBehaviorAsLoad(t *testing.T) {
+	setHash(t)
+	if _, err := Parse([]byte(validYAML)); err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+}
+
+func TestHash_SameBytesSameHash(t *testing.T) {
+	a := Hash([]byte("x"))
+	b := Hash([]byte("x"))
+	c := Hash([]byte("y"))
+	if a != b || a == c {
+		t.Fatalf("Hash(%q) = %q, Hash(%q) = %q; want equal hashes for equal input, different for different input", "x", a, "y", c)
+	}
+}
+
 func TestLoad_Valid(t *testing.T) {
 	setHash(t)
 	cfg, err := Load(writeTemp(t, validYAML))
@@ -106,11 +120,8 @@ func TestLoad_Valid(t *testing.T) {
 	if cfg.StartingScore != 1000 {
 		t.Errorf("StartingScore = %d, want 1000", cfg.StartingScore)
 	}
-	if cfg.MassFailureFraction == nil {
-		t.Fatal("MassFailureFraction = nil, want 0.5")
-	}
-	if *cfg.MassFailureFraction != 0.5 {
-		t.Errorf("MassFailureFraction = %v, want 0.5", *cfg.MassFailureFraction)
+	if cfg.RoundIntervalSeconds != 30 {
+		t.Errorf("RoundIntervalSeconds = %d, want 30", cfg.RoundIntervalSeconds)
 	}
 	if cfg.Admin.Username != "admin" {
 		t.Errorf("Admin.Username = %q, want admin", cfg.Admin.Username)
@@ -132,9 +143,6 @@ func TestLoad_Valid(t *testing.T) {
 	if web.CheckType != "http" {
 		t.Errorf("Services[0].CheckType = %q, want http", web.CheckType)
 	}
-	if web.IntervalSeconds != 60 {
-		t.Errorf("Services[0].IntervalSeconds = %d, want 60", web.IntervalSeconds)
-	}
 	if web.PointsPerFailure != 10 {
 		t.Errorf("Services[0].PointsPerFailure = %d, want 10", web.PointsPerFailure)
 	}
@@ -143,8 +151,8 @@ func TestLoad_Valid(t *testing.T) {
 	if telnet.Name != "telnet-win" || telnet.CheckType != "tcp_connect" {
 		t.Errorf("Services[1] = %+v, want telnet-win/tcp_connect", telnet)
 	}
-	if telnet.IntervalSeconds != 30 || telnet.PointsPerFailure != 5 {
-		t.Errorf("Services[1] interval/points = %d/%d, want 30/5", telnet.IntervalSeconds, telnet.PointsPerFailure)
+	if telnet.PointsPerFailure != 5 {
+		t.Errorf("Services[1].PointsPerFailure = %d, want 5", telnet.PointsPerFailure)
 	}
 }
 
@@ -186,9 +194,6 @@ func TestLoad_MinimalConfig(t *testing.T) {
 	cfg, err := Load(writeTemp(t, minimalYAML))
 	if err != nil {
 		t.Fatalf("Load returned error: %v", err)
-	}
-	if cfg.MassFailureFraction != nil {
-		t.Errorf("MassFailureFraction = %v, want nil when mass_failure_fraction is omitted", *cfg.MassFailureFraction)
 	}
 	if port, _ := cfg.Services[0].Params["port"].(int); port != 22 || len(cfg.Services[0].Params) != 1 {
 		t.Errorf("Params = %v, want just port 22", cfg.Services[0].Params)
@@ -270,7 +275,6 @@ func TestLoadService_RejectsInvalidParams(t *testing.T) {
   - name: broken
     host: 10.0.3.1
     check_type: tcp_connect
-    interval_seconds: 30
     points_per_failure: 5
     params: {prot: 23}
 `
@@ -345,11 +349,12 @@ func TestLoad_InvalidConfigs(t *testing.T) {
 			wantErr: "yaml",
 		},
 		{
-			name: "unknown top-level field",
+			name: "unknown top-level field (the removed mass_failure_fraction too)",
 			yaml: `
 session_name: "s"
 starting_score: 1000
-mass_failure_fracton: 0.5
+round_interval_seconds: 60
+mass_failure_fraction: 0.8
 admin:
   username: admin
   password_hash: ${TEST_ADMIN_HASH}
@@ -357,22 +362,30 @@ services:
   - name: svc1
     host: 127.0.0.1
     check_type: http
-    interval_seconds: 60
     points_per_failure: 10
 `,
-			wantErr: "mass_failure_fracton",
+			wantErr: "mass_failure_fraction",
 		},
 		{
 			// Strictness is recursive: a typo inside a service entry is
 			// rejected too, instead of leaving the field at its zero value.
 			name:    "unknown service field",
-			yaml:    strings.Replace(minimalYAML, "interval_seconds: 60", "interval_second: 60", 1),
-			wantErr: "interval_second",
+			yaml:    strings.Replace(minimalYAML, "points_per_failure: 10", "points_per_falure: 10", 1),
+			wantErr: "points_per_falure",
+		},
+		{
+			// The pre-rounds per-service interval is gone; a config still
+			// carrying one must fail loudly rather than have it silently
+			// ignored in favour of the shared round interval.
+			name:    "leftover per-service interval_seconds",
+			yaml:    strings.Replace(minimalYAML, "    points_per_failure: 10\n", "    points_per_failure: 10\n    interval_seconds: 60\n", 1),
+			wantErr: "interval_seconds",
 		},
 		{
 			name: "missing session_name",
 			yaml: `
 starting_score: 1000
+round_interval_seconds: 60
 admin:
   username: admin
   password_hash: ${TEST_ADMIN_HASH}
@@ -380,7 +393,6 @@ services:
   - name: svc1
     host: 127.0.0.1
     check_type: http
-    interval_seconds: 60
     points_per_failure: 10
 `,
 			wantErr: "session_name",
@@ -394,16 +406,6 @@ services:
 			name:    "negative starting_score",
 			yaml:    strings.Replace(minimalYAML, "starting_score: 500", "starting_score: -1", 1),
 			wantErr: "starting_score",
-		},
-		{
-			name:    "mass_failure_fraction zero",
-			yaml:    strings.Replace(validYAML, "mass_failure_fraction: 0.5", "mass_failure_fraction: 0", 1),
-			wantErr: "mass_failure_fraction",
-		},
-		{
-			name:    "mass_failure_fraction above one",
-			yaml:    strings.Replace(validYAML, "mass_failure_fraction: 0.5", "mass_failure_fraction: 1.5", 1),
-			wantErr: "mass_failure_fraction",
 		},
 		{
 			name:    "missing admin username",
@@ -421,7 +423,6 @@ services:
   - name: apache-web
     host: 10.0.1.99
     check_type: http
-    interval_seconds: 60
     points_per_failure: 10
     params:
       port: 80
@@ -438,13 +439,13 @@ services:
 			yaml: `
 session_name: "s"
 starting_score: 1000
+round_interval_seconds: 60
 admin:
   username: admin
   password_hash: ${TEST_ADMIN_HASH}
 services:
   - host: 127.0.0.1
     check_type: http
-    interval_seconds: 60
     points_per_failure: 10
 `,
 			wantErr: "services[0].name",
@@ -453,11 +454,6 @@ services:
 			name:    "missing service host",
 			yaml:    strings.Replace(minimalYAML, "    host: 127.0.0.1\n", "", 1),
 			wantErr: "host",
-		},
-		{
-			name:    "zero interval_seconds",
-			yaml:    strings.Replace(minimalYAML, "interval_seconds: 60", "interval_seconds: 0", 1),
-			wantErr: "interval_seconds",
 		},
 		{
 			name:    "negative points_per_failure",
@@ -480,6 +476,26 @@ services:
 	}
 }
 
+func TestLoad_RoundIntervalSecondsRequired(t *testing.T) {
+	setHash(t)
+	_, err := Load(writeTemp(t, strings.Replace(minimalYAML, "round_interval_seconds: 60\n", "", 1)))
+	if err == nil || !strings.Contains(err.Error(), "round_interval_seconds") {
+		t.Fatalf("Load error = %v, want one naming round_interval_seconds", err)
+	}
+}
+
+func TestLoad_RoundIntervalSecondsMustBePositive(t *testing.T) {
+	for _, n := range []string{"0", "-5"} {
+		t.Run(n, func(t *testing.T) {
+			setHash(t)
+			_, err := Load(writeTemp(t, strings.Replace(minimalYAML, "round_interval_seconds: 60", "round_interval_seconds: "+n, 1)))
+			if err == nil || !strings.Contains(err.Error(), "round_interval_seconds must be a positive integer") {
+				t.Fatalf("Load error = %v, want the positive-integer error", err)
+			}
+		})
+	}
+}
+
 func TestLoadService_Found(t *testing.T) {
 	setHash(t)
 	svc, err := LoadService(writeTemp(t, validYAML), "telnet-win")
@@ -492,8 +508,8 @@ func TestLoadService_Found(t *testing.T) {
 	if svc.Host != "10.0.2.15" {
 		t.Errorf("Host = %q, want 10.0.2.15", svc.Host)
 	}
-	if svc.IntervalSeconds != 30 {
-		t.Errorf("IntervalSeconds = %d, want 30", svc.IntervalSeconds)
+	if svc.PointsPerFailure != 5 {
+		t.Errorf("PointsPerFailure = %d, want 5", svc.PointsPerFailure)
 	}
 	if port, _ := svc.Params["port"].(int); port != 23 {
 		t.Errorf("Params[port] = %#v, want 23", svc.Params["port"])
@@ -526,5 +542,30 @@ func TestLoadService_InvalidConfigIsNotServiceNotFound(t *testing.T) {
 	}
 	if errors.Is(err, ErrServiceNotFound) {
 		t.Errorf("error = %v, want a validation error distinct from ErrServiceNotFound", err)
+	}
+}
+
+// The check command must run without the admin hash in its environment: an
+// unset ${VAR} is reported, not fatal, and the admin section is not checked.
+// Services are still validated exactly as Load validates them.
+func TestLoadForChecks_ToleratesUnsetAdminHash(t *testing.T) {
+	const unsetVar = "SOME_UNSET_VAR_XYZ"
+	os.Unsetenv(unsetVar)
+	yml := strings.Replace(minimalYAML, "${TEST_ADMIN_HASH}", "${"+unsetVar+"}", 1)
+
+	cfg, unset, err := LoadForChecks(writeTemp(t, yml))
+	if err != nil {
+		t.Fatalf("LoadForChecks: %v", err)
+	}
+	if !slices.Equal(unset, []string{unsetVar}) {
+		t.Errorf("unsetVars = %v, want [%s]", unset, unsetVar)
+	}
+	if len(cfg.Services) != 1 || cfg.Services[0].Name != "svc1" {
+		t.Errorf("services = %+v, want the one svc1", cfg.Services)
+	}
+
+	bad := strings.Replace(yml, "check_type: tcp_connect", "check_type: not_a_real_check", 1)
+	if _, _, err := LoadForChecks(writeTemp(t, bad)); err == nil || !strings.Contains(err.Error(), "not_a_real_check") {
+		t.Errorf("LoadForChecks with a bad check_type: err = %v, want it to name the unknown check type", err)
 	}
 }

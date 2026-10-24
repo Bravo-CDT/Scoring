@@ -20,17 +20,25 @@ import (
 	"database/sql"
 	"fmt"
 	"net/url"
+	"os"
+	"path/filepath"
+	"strings"
+	"time"
 
 	_ "modernc.org/sqlite"
 )
 
 // Store is a handle on the engine's database. It is safe for concurrent use.
 type Store struct {
-	db *sql.DB
+	db   *sql.DB
+	path string
 }
 
 // schema is applied on every Open. Every statement is IF NOT EXISTS, so
-// reopening an existing database is a no-op.
+// reopening an existing database is a no-op — which also means a column added
+// here never reaches a table an older engine already created. There are no
+// migrations (the data is disposable before competition day); Open instead
+// refuses such a file, see requireCurrentSchema.
 //
 // Conventions: all timestamps are Unix milliseconds (INTEGER), all booleans are
 // 0/1 (INTEGER), and money-like values (points, scores) are whole INTEGERs — no
@@ -59,7 +67,6 @@ CREATE TABLE IF NOT EXISTS service_config_snapshots (
 	applied_at         INTEGER NOT NULL,
 	host               TEXT NOT NULL,
 	check_type         TEXT NOT NULL,
-	interval_seconds   INTEGER NOT NULL,
 	points_per_failure INTEGER NOT NULL,
 	params_json        TEXT NOT NULL
 );
@@ -68,6 +75,7 @@ CREATE TABLE IF NOT EXISTS check_results (
 	id          INTEGER PRIMARY KEY AUTOINCREMENT,
 	session_id  INTEGER NOT NULL REFERENCES sessions(id),
 	service_id  INTEGER NOT NULL REFERENCES services(id),
+	round       INTEGER NOT NULL DEFAULT 0,
 	timestamp   INTEGER NOT NULL,
 	success     INTEGER NOT NULL,
 	latency_ms  INTEGER NOT NULL,
@@ -118,10 +126,19 @@ CREATE INDEX IF NOT EXISTS idx_events_session_ts
 	ON events(session_id, service_id, timestamp DESC);
 
 -- Singleton row (id = 1) holding the engine's run state; see runstate.go.
+-- countdown_target is NULL when no countdown is set.
 CREATE TABLE IF NOT EXISTS engine_run_state (
-	id             INTEGER PRIMARY KEY CHECK (id = 1),
-	engine_state   TEXT NOT NULL,
-	scoring_paused INTEGER NOT NULL
+	id               INTEGER PRIMARY KEY CHECK (id = 1),
+	engine_state     TEXT NOT NULL,
+	scoring_paused   INTEGER NOT NULL,
+	countdown_target INTEGER
+);
+
+-- Singleton counter backing AdjustScore's ledger source_ref, so every manual
+-- adjustment gets a distinct, monotonically increasing reference.
+CREATE TABLE IF NOT EXISTS manual_adjustment_seq (
+	id   INTEGER PRIMARY KEY CHECK (id = 1),
+	next INTEGER NOT NULL DEFAULT 1
 );
 `
 
@@ -141,17 +158,45 @@ func Open(path string) (*Store, error) {
 	db.SetMaxOpenConns(1)
 	db.SetMaxIdleConns(1)
 
-	s := &Store{db: db}
+	s := &Store{db: db, path: path}
 	// sql.Open is lazy, so this is also where an unusable path surfaces.
 	if _, err := db.Exec(schema); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("store: applying schema to %s: %w", path, err)
+	}
+	if err := s.requireCurrentSchema(path); err != nil {
+		db.Close()
+		return nil, err
 	}
 	if err := s.resetRunStateToSafeDefault(); err != nil {
 		db.Close()
 		return nil, err
 	}
 	return s, nil
+}
+
+// requireCurrentSchema fails when the database at path was created before
+// scoring rounds: its check_results table has no round column, and every
+// check result insert would fail with a raw SQL error. Saying so up front,
+// with what to do about it, beats that. The round column stands for the whole
+// change: engine_run_state.countdown_target arrived with it.
+func (s *Store) requireCurrentSchema(path string) error {
+	hasRound, err := s.hasColumn("check_results", "round")
+	if err != nil {
+		return fmt.Errorf("store: checking schema of %s: %w", path, err)
+	}
+	if !hasRound {
+		return fmt.Errorf("store: %s predates scoring rounds (check_results has no round column) "+
+			"and cannot be migrated; start the engine with a fresh -db path", path)
+	}
+	return nil
+}
+
+// hasColumn reports whether table has a column named column.
+func (s *Store) hasColumn(table, column string) (bool, error) {
+	var count int
+	err := s.db.QueryRow(`SELECT COUNT(*) FROM pragma_table_info(?) WHERE name = ?`, table, column).Scan(&count)
+	return count > 0, err
 }
 
 // dsn builds the modernc.org/sqlite connection string for path. The pragmas
@@ -183,4 +228,25 @@ func (s *Store) Close() error {
 		return fmt.Errorf("store: closing database: %w", err)
 	}
 	return nil
+}
+
+// Backup writes a complete, transactionally-consistent snapshot of the
+// database to a new file in a "backups" directory next to the database file
+// (created if missing), named "<db base name>-<UTC timestamp to the millisecond>.db". It uses
+// SQLite's VACUUM INTO, which produces a correct snapshot regardless of the
+// WAL's state -- unlike copying the .db/-wal/-shm files directly, which
+// could capture an inconsistent mid-checkpoint state. Returns the backup
+// file's full path.
+func (s *Store) Backup() (string, error) {
+	dir := filepath.Join(filepath.Dir(s.path), "backups")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return "", fmt.Errorf("store: creating backups directory %s: %w", dir, err)
+	}
+	base := strings.TrimSuffix(filepath.Base(s.path), filepath.Ext(s.path))
+	name := fmt.Sprintf("%s-%s.db", base, time.Now().UTC().Format("20060102T150405.000Z"))
+	dest := filepath.Join(dir, name)
+	if _, err := s.db.Exec(`VACUUM INTO ?`, dest); err != nil {
+		return "", fmt.Errorf("store: backing up to %s: %w", dest, err)
+	}
+	return dest, nil
 }

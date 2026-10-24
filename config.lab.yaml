@@ -1,0 +1,135 @@
+# The real lab network's config. Copy to config.yaml, or run with
+# CONFIG=config.lab.yaml. See config.example.yaml for the full per-field and
+# per-check-type reference.
+#
+# The service passwords below are the competition's known starting default
+# (Patty321!) -- blue teams are expected to rotate it on their boxes later,
+# at which point these checks will start failing until this file (or the
+# live service's entry via POST /reload) is updated to match.
+#
+# Before `make run`, still set ADMIN_PASSWORD_HASH in the environment (see
+# `make hash`) -- that's the scoring engine's own admin login, not a service
+# credential, and is deliberately kept out of this file.
+#
+# The ca and telnet services are script checks: their scripts live in
+# checks/ (paths are relative to the repo root, so run the engine from
+# there) and need tools installed once per scoring box with
+# `make check-deps`. `make check CONFIG=config.lab.yaml` runs every check
+# once by hand.
+#
+# round_interval_seconds and points_per_failure below are starting points --
+# tune them to match whatever cadence/weighting you actually want for the
+# competition.
+session_name: "krusty-krab-comp"
+starting_score: 1000000
+round_interval_seconds: 60
+
+admin:
+  username: admin
+  password_hash: ${ADMIN_PASSWORD_HASH}
+
+services:
+  - name: apache
+    host: 10.111.1.4
+    check_type: http
+    points_per_failure: 1000
+    params:
+      port: 80
+
+  - name: postgresql
+    host: 10.111.1.2
+    check_type: postgres
+    points_per_failure: 1000
+    params:
+      port: 5432
+      user: mrkrabs
+      password: Patty321!
+      dbname: KrustySafe
+
+  - name: smb
+    host: 10.111.1.1
+    check_type: smb
+    points_per_failure: 1000
+    params:
+      port: 445
+      user: mrkrabs
+      password: Patty321!
+      share: sambashare
+      expect_share: sambashare
+      expect_file: secretformula.txt
+
+  - name: smtp
+    host: 10.111.1.3
+    check_type: smtp
+    points_per_failure: 1000
+    params:
+      port: 587
+      user: mrkrabs
+      password: Patty321!
+      # The lab's mail server almost certainly uses a self-signed cert.
+      insecure_skip_verify: true
+
+  - name: nginx-docker
+    host: 10.111.1.5
+    check_type: http_exclusive
+    points_per_failure: 1000
+    params:
+      port: 80
+      expect_contains_ci: wordpress
+      closed_port: 8080
+
+  - name: dns
+    host: 10.111.2.1
+    check_type: dns
+    points_per_failure: 1000
+    params:
+      port: 53
+      name: krusty.krab
+
+  - name: ad
+    host: 10.111.2.1
+    check_type: ldap
+    points_per_failure: 1000
+    params:
+      port: 389
+      bind_user: spongebob@krusty.krab
+      password: Patty321!
+      base_dn: dc=krusty,dc=krab
+      search_user: spongebob
+
+  - name: iis
+    host: 10.111.2.3
+    check_type: http
+    points_per_failure: 1000
+    params:
+      port: 443
+      https: true
+      # Connect to host but address the request (and verify the cert) as
+      # this name, like curl's --resolve. Certificate verification stays on.
+      server_name: orderwindow.krusty.krab
+      expect_status: 200
+      expect_contains: "Something legendary is cooking under the sea."
+
+  - name: ca
+    host: 10.111.2.2
+    check_type: script
+    points_per_failure: 1000
+    params:
+      script: checks/ca_rpc.sh
+
+  - name: openfire
+    host: 10.111.2.4
+    check_type: openfire
+    points_per_failure: 1000
+    params:
+      port: 9090
+      user: sandy
+      password: Patty321!
+
+  - name: telnet
+    host: 10.111.2.5
+    check_type: script
+    points_per_failure: 1000
+    params:
+      script: checks/telnet.exp
+      env: {CHECK_USER: sandy, CHECK_PASSWORD: "Patty321!", CHECK_EXPECT_HOSTNAME: kelpdelivery}

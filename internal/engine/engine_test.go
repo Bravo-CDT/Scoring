@@ -42,7 +42,6 @@ func svcYAML(name string, pointsPerFailure int) string {
   - name: %s
     host: 127.0.0.1
     check_type: tcp_connect
-    interval_seconds: 1
     points_per_failure: %d
     params: {port: 9}
 `, name, pointsPerFailure)
@@ -62,6 +61,7 @@ func configWithServices(services string) string {
 	return fmt.Sprintf(`
 session_name: "comp-1"
 starting_score: 1000
+round_interval_seconds: 1
 admin:
   username: admin
   password_hash: %q
@@ -86,10 +86,22 @@ func failCheck(context.Context, string, map[string]any) checks.Result {
 	return checks.Result{Success: false, Detail: "connection refused"}
 }
 
+// testRound is the harness scheduler's round interval: short, so a started
+// service is checked within milliseconds.
+const testRound = 20 * time.Millisecond
+
 // newHarness writes a config with services, creates their rows the way
-// startup does, and returns an engine whose checks run check with no startup
-// stagger. The engine is stopped and the store closed when the test ends.
+// startup does, and returns an engine whose checks run check in testRound
+// rounds. The round loop and the engine are stopped and the store closed when
+// the test ends.
 func newHarness(t *testing.T, check checks.CheckFunc, services ...string) *harness {
+	t.Helper()
+	return newHarnessWithSink(t, check, nil, services...)
+}
+
+// newHarnessWithSink is newHarness with the scheduler reporting to
+// wrap(scorer) instead of straight to the scorer, when wrap is non-nil.
+func newHarnessWithSink(t *testing.T, check checks.CheckFunc, wrap func(scheduler.ResultSink) scheduler.ResultSink, services ...string) *harness {
 	t.Helper()
 	dir := t.TempDir()
 	h := &harness{
@@ -117,11 +129,19 @@ func newHarness(t *testing.T, check checks.CheckFunc, services ...string) *harne
 
 	registry := checks.NewRegistry()
 	registry.Register("tcp_connect", check)
-	sched := scheduler.New(registry, scorer.New(st, h.sess.ID, nil), h.configPath)
-	sched.SetMaxStagger(0)
+	var sink scheduler.ResultSink = scorer.New(st, h.sess.ID)
+	if wrap != nil {
+		sink = wrap(sink)
+	}
+	sched := scheduler.New(registry, sink, h.configPath, testRound)
 	h.e = New(st, h.sess, sched, h.configPath)
 	// Registered after the store's Close, so it runs first.
 	t.Cleanup(func() { h.e.Stop() })
+	// Registered last, so it runs first: as in app.Close, the round loop is
+	// gone before anything it records into is torn down.
+	ctx, cancel := context.WithCancel(context.Background())
+	done := sched.Run(ctx, 1)
+	t.Cleanup(func() { cancel(); <-done })
 	return h
 }
 
@@ -336,7 +356,6 @@ func TestReload_ReportsAddedRoutinesThatFailToStart(t *testing.T) {
   - name: svc3
     host: 127.0.0.1
     check_type: http
-    interval_seconds: 1
     points_per_failure: 10
     params: {port: 80}
 `))
@@ -441,6 +460,28 @@ func TestStart_RecordsConfigSnapshotPerRoutineStart(t *testing.T) {
 	if got := h.snapshotPoints(t, "svc1"); !slices.Equal(got, []int{10, 25}) {
 		t.Errorf("after restart: snapshots = %v, want [10 25]", got)
 	}
+}
+
+func TestStatus_CheckingReflectsAnInFlightCheck(t *testing.T) {
+	checkStarted := make(chan struct{})
+	release := make(chan struct{})
+	slowCheck := func(context.Context, string, map[string]any) checks.Result {
+		close(checkStarted)
+		<-release
+		return checks.Result{Success: true}
+	}
+	h := newHarness(t, slowCheck, "svc1")
+	if h.status(t).Services[0].Checking {
+		t.Fatal("Checking is true before the engine has started")
+	}
+	h.start(t) // starting the engine runs a round at once
+
+	<-checkStarted
+	if !h.status(t).Services[0].Checking {
+		t.Fatal("Checking is false while svc1's check is still running")
+	}
+	close(release)
+	waitFor(t, "svc1's check to finish", func() bool { return !h.status(t).Services[0].Checking })
 }
 
 func TestStop_HaltsEveryRoutine(t *testing.T) {
@@ -672,31 +713,167 @@ func TestPauseAndResumeScoring(t *testing.T) {
 	}
 }
 
+func TestAdjustScore_RejectedUnlessScoringIsPaused(t *testing.T) {
+	h := newHarness(t, okCheck, "svc1")
+	h.start(t)
+	mustDo(t, "ResumeScoring", h.e.ResumeScoring())
+	if err := h.e.AdjustScore(store.SideBlue, 10, "test"); !errors.Is(err, ErrScoringNotPaused) {
+		t.Fatalf("AdjustScore while scoring is not paused: got %v, want ErrScoringNotPaused", err)
+	}
+}
+
+func TestAdjustScore_RejectsDeltaBeyondTheMax(t *testing.T) {
+	h := newHarness(t, okCheck, "svc1")
+	if err := h.e.AdjustScore(store.SideBlue, MaxAdjustmentPoints+1, "test"); !errors.Is(err, ErrInvalidAdjustment) {
+		t.Fatalf("AdjustScore(MaxAdjustmentPoints+1): got %v, want ErrInvalidAdjustment", err)
+	}
+	if err := h.e.AdjustScore(store.SideBlue, -(MaxAdjustmentPoints + 1), "test"); !errors.Is(err, ErrInvalidAdjustment) {
+		t.Fatalf("AdjustScore(-(MaxAdjustmentPoints+1)): got %v, want ErrInvalidAdjustment", err)
+	}
+	// Exactly the max, in either direction, is still allowed.
+	if err := h.e.AdjustScore(store.SideBlue, MaxAdjustmentPoints, "test"); err != nil {
+		t.Errorf("AdjustScore(MaxAdjustmentPoints): %v, want no error", err)
+	}
+}
+
+func TestAdjustScore_RejectsAnUnknownSideAndZeroDelta(t *testing.T) {
+	h := newHarness(t, okCheck, "svc1")
+	if err := h.e.AdjustScore("manual", 10, "test"); !errors.Is(err, ErrInvalidAdjustment) {
+		t.Fatalf("AdjustScore(manual side): got %v, want ErrInvalidAdjustment", err)
+	}
+	if err := h.e.AdjustScore(store.SideBlue, 0, "test"); !errors.Is(err, ErrInvalidAdjustment) {
+		t.Fatalf("AdjustScore(0 delta): got %v, want ErrInvalidAdjustment", err)
+	}
+}
+
+func TestAdjustScore_AllowedWhileScoringPausedEvenIfEngineRunning(t *testing.T) {
+	h := newHarness(t, okCheck, "svc1")
+	h.start(t)
+	mustDo(t, "PauseScoring", h.e.PauseScoring())
+	if err := h.e.AdjustScore(store.SideBlue, 10, "test"); err != nil {
+		t.Fatalf("AdjustScore while paused: %v", err)
+	}
+	if got := h.status(t).BlueScore; got != 1010 {
+		t.Fatalf("BlueScore = %d, want 1010", got)
+	}
+}
+
+func TestBackupDatabase_RejectedWhileEngineIsRunning(t *testing.T) {
+	h := newHarness(t, okCheck, "svc1")
+	h.start(t)
+	if _, err := h.e.BackupDatabase(); !errors.Is(err, ErrEngineRunning) {
+		t.Fatalf("BackupDatabase while running: got %v, want ErrEngineRunning", err)
+	}
+}
+
+func TestBackupDatabase_SucceedsWhileStopped(t *testing.T) {
+	h := newHarness(t, okCheck, "svc1") // engine starts stopped
+	path, err := h.e.BackupDatabase()
+	if err != nil {
+		t.Fatalf("BackupDatabase: %v", err)
+	}
+	if path == "" {
+		t.Fatal("expected a non-empty backup path")
+	}
+}
+
+func TestResetRound_RejectedWhileEngineIsRunning(t *testing.T) {
+	h := newHarness(t, okCheck, "svc1")
+	h.start(t)
+	if _, err := h.e.ResetRound(true); !errors.Is(err, ErrEngineRunning) {
+		t.Fatalf("ResetRound while running: got %v, want ErrEngineRunning", err)
+	}
+}
+
+func TestResetRound_BacksUpFirstByDefaultAndThenResets(t *testing.T) {
+	h := newHarness(t, okCheck, "svc1")
+	h.start(t)
+	waitFor(t, "a check to be recorded", func() bool { return h.countResults(t, "svc1") > 0 })
+	mustDo(t, "Stop", h.e.Stop())
+
+	path, err := h.e.ResetRound(true)
+	if err != nil {
+		t.Fatalf("ResetRound: %v", err)
+	}
+	if path == "" {
+		t.Fatal("expected a non-empty backup path when backup=true")
+	}
+	if got := h.status(t).BlueScore; got != 1000 {
+		t.Fatalf("BlueScore after reset = %d, want 1000 (starting score)", got)
+	}
+	if got := h.countResults(t, "svc1"); got != 0 {
+		t.Fatalf("check results after reset = %d, want 0", got)
+	}
+}
+
+// A reset starts the round numbering over: the next round recorded is 1.
+func TestResetRound_RestartsRoundNumbering(t *testing.T) {
+	h := newHarness(t, okCheck, "svc1")
+	h.start(t)
+	waitFor(t, "two rounds", func() bool { return h.status(t).Round >= 2 })
+	mustDo(t, "Stop", h.e.Stop())
+
+	if _, err := h.e.ResetRound(false); err != nil {
+		t.Fatalf("ResetRound: %v", err)
+	}
+	if got := h.status(t).Round; got != 0 {
+		t.Fatalf("Round after reset = %d, want 0", got)
+	}
+	h.start(t)
+	waitFor(t, "a round after the reset", func() bool { return h.status(t).Round >= 1 })
+	if got := h.status(t).Round; got != 1 {
+		t.Errorf("first round after reset = %d, want 1", got)
+	}
+}
+
+func TestResetRound_WithoutBackupSkipsIt(t *testing.T) {
+	h := newHarness(t, okCheck, "svc1")
+	path, err := h.e.ResetRound(false)
+	if err != nil {
+		t.Fatalf("ResetRound: %v", err)
+	}
+	if path != "" {
+		t.Fatalf("expected an empty backup path when backup=false, got %q", path)
+	}
+}
+
+// stuckSink is a ResultSink whose first RecordRound signals inRecord and then
+// blocks until release is closed, before passing the round on.
+type stuckSink struct {
+	inner    scheduler.ResultSink
+	once     sync.Once
+	inRecord chan struct{}
+	release  chan struct{}
+}
+
+func (s *stuckSink) RecordRound(round int, roundStart time.Time, results []checks.RoundResult) error {
+	s.once.Do(func() {
+		close(s.inRecord)
+		<-s.release
+	})
+	return s.inner.RecordRound(round, roundStart, results)
+}
+
 // TestScoringPausesNotBlockedByStuckControlOp: pausing scoring is the admin's
 // emergency lever, so it must work even while another control operation is
-// stuck — here a StopService waiting on a check that ignores cancellation.
+// stuck — here a StopService waiting for a round that is stuck being
+// recorded.
 func TestScoringPausesNotBlockedByStuckControlOp(t *testing.T) {
 	release := make(chan struct{})
 	var releaseOnce sync.Once
 	unblock := func() { releaseOnce.Do(func() { close(release) }) }
-	inCheck := make(chan struct{}, 1)
-	stuckCheck := func(context.Context, string, map[string]any) checks.Result {
-		select {
-		case inCheck <- struct{}{}:
-		default:
-		}
-		<-release // deliberately ignores ctx
-		return checks.Result{Success: true}
-	}
-	h := newHarness(t, stuckCheck, "svc1")
-	// Runs before the harness's e.Stop cleanup, which would otherwise hang.
+	inRecord := make(chan struct{})
+	h := newHarnessWithSink(t, okCheck, func(inner scheduler.ResultSink) scheduler.ResultSink {
+		return &stuckSink{inner: inner, inRecord: inRecord, release: release}
+	}, "svc1")
+	// Runs before the harness's cleanups, which would otherwise hang.
 	t.Cleanup(unblock)
 
 	h.start(t)
 	select {
-	case <-inCheck:
+	case <-inRecord:
 	case <-time.After(waitTimeout):
-		t.Fatal("check never started")
+		t.Fatal("no round was ever recorded")
 	}
 
 	stopDone := make(chan error, 1)
@@ -718,6 +895,7 @@ func TestScoringPausesNotBlockedByStuckControlOp(t *testing.T) {
 		{"ResumeScoring", h.e.ResumeScoring},
 		{"PauseServiceScoring", func() error { return h.e.PauseServiceScoring("svc1") }},
 		{"ResumeServiceScoring", func() error { return h.e.ResumeServiceScoring("svc1") }},
+		{"SetCountdownTarget", func() error { return h.e.SetCountdownTarget(nil) }},
 	}
 	for _, op := range ops {
 		done := make(chan error, 1)
@@ -731,7 +909,7 @@ func TestScoringPausesNotBlockedByStuckControlOp(t *testing.T) {
 	}
 	select {
 	case <-stopDone:
-		t.Fatal("StopService finished before the check was released; the test proved nothing")
+		t.Fatal("StopService finished before the round was released; the test proved nothing")
 	default:
 	}
 
@@ -740,7 +918,7 @@ func TestScoringPausesNotBlockedByStuckControlOp(t *testing.T) {
 	case err := <-stopDone:
 		mustDo(t, "StopService", err)
 	case <-time.After(waitTimeout):
-		t.Fatal("StopService did not finish after the check was released")
+		t.Fatal("StopService did not finish after the round was released")
 	}
 }
 
@@ -905,6 +1083,19 @@ func TestReload_InvalidConfigChangesNothing(t *testing.T) {
 	}
 }
 
+func TestReload_UpdatesLoadedConfigHash(t *testing.T) {
+	h := newHarness(t, okCheck, "svc1")
+	before := h.e.LoadedConfigHash()
+	h.writeConfig(t, configYAML("svc1", "svc2"))
+	if _, err := h.e.Reload(h.configPath); err != nil {
+		t.Fatalf("Reload: %v", err)
+	}
+	after := h.e.LoadedConfigHash()
+	if after == "" || after == before {
+		t.Fatalf("LoadedConfigHash did not change after a successful Reload with a changed file (before=%q, after=%q)", before, after)
+	}
+}
+
 // The app's startup sync and shutdown stop are automatic, not an admin's
 // doing, so their events must say so.
 func TestReloadAs_SystemAttributesEveryEvent(t *testing.T) {
@@ -965,6 +1156,28 @@ func TestReload_NoChangesReturnsEmptySlices(t *testing.T) {
 	}
 }
 
+// Reload applies an edited starting score at once, and restarts a running
+// service whose entry changed so the edit is used from its next round.
+func TestReload_AppliesStartingScoreAndChangedEntries(t *testing.T) {
+	h := newHarness(t, okCheck, "svc1", "svc2")
+	h.start(t)
+	cfg := strings.Replace(configWithServices(svcYAML("svc1", 10)+svcYAML("svc2", 250)),
+		"starting_score: 1000", "starting_score: 1000000", 1)
+	h.writeConfig(t, cfg)
+
+	res, err := h.e.Reload(h.configPath)
+	mustDo(t, "Reload", err)
+	if !slices.Equal(res.Updated, []string{"svc2"}) {
+		t.Errorf("Updated = %v, want [svc2]", res.Updated)
+	}
+	if got, _ := h.e.scheduler.ServiceConfig(h.service(t, "svc2").ID); got.PointsPerFailure != 250 {
+		t.Errorf("svc2 runs with points_per_failure %d, want 250", got.PointsPerFailure)
+	}
+	if s := h.status(t); s.StartingScore != 1000000 || s.BlueScore != 1000000 {
+		t.Errorf("StartingScore = %d, BlueScore = %d; want both 1000000", s.StartingScore, s.BlueScore)
+	}
+}
+
 func TestStatus_ReportsLatestResultAndConsecutiveFailures(t *testing.T) {
 	h := newHarness(t, okCheck, "svc1")
 	svc := h.service(t, "svc1")
@@ -1007,7 +1220,7 @@ func TestStatus_JSONShape(t *testing.T) {
 	var got map[string]any
 	mustDo(t, "Unmarshal", json.Unmarshal(raw, &got))
 	for _, key := range []string{"session_name", "starting_score", "blue_score", "red_score",
-		"engine_state", "scoring_paused", "server_time", "services"} {
+		"engine_state", "scoring_paused", "server_time", "round", "next_round_at", "services"} {
 		if _, ok := got[key]; !ok {
 			t.Errorf("status JSON missing %q: %s", key, raw)
 		}
@@ -1021,6 +1234,79 @@ func TestStatus_JSONShape(t *testing.T) {
 	// No check has run yet, so there is no last check time to report.
 	if _, ok := svc["last_check_time"]; ok {
 		t.Errorf("last_check_time present before any check: %s", raw)
+	}
+	// No admin has set a countdown, so there is no target to report.
+	if _, ok := got["countdown_target"]; ok {
+		t.Errorf("countdown_target present before one was set: %s", raw)
+	}
+}
+
+// Status reports the scheduler's round status: no round recorded before the
+// first one, then what the round clock last recorded.
+func TestStatus_IncludesRoundAndNextRoundAt(t *testing.T) {
+	h := newHarness(t, okCheck, "svc1")
+	if s := h.status(t); s.Round != 0 {
+		t.Errorf("before any round: Round = %d, want 0", s.Round)
+	}
+
+	h.start(t)
+	waitFor(t, "a round to be recorded", func() bool { return h.status(t).Round >= 1 })
+	// Stopping the engine waits out any round being recorded and leaves no
+	// service enabled, so the round number holds still from here on (idle
+	// ticks still move NextRoundAt forward).
+	mustDo(t, "Stop", h.e.Stop())
+	wantRound, wantNext := h.e.scheduler.RoundStatus()
+
+	s := h.status(t)
+	if s.Round != wantRound || s.NextRoundAt.Before(wantNext) {
+		t.Errorf("Round = %d, NextRoundAt = %v; want %d, not before %v", s.Round, s.NextRoundAt, wantRound, wantNext)
+	}
+	if wantNext.IsZero() {
+		t.Error("scheduler reports a zero NextRoundAt after a recorded round")
+	}
+}
+
+func TestSetCountdownTarget_PersistsAndAppearsInStatus(t *testing.T) {
+	h := newHarness(t, okCheck, "svc1")
+	if s := h.status(t); s.CountdownTarget != nil {
+		t.Fatalf("CountdownTarget = %v before any was set, want nil", s.CountdownTarget)
+	}
+
+	target := time.Date(2026, 10, 17, 17, 0, 0, 0, time.UTC)
+	mustDo(t, "SetCountdownTarget", h.e.SetCountdownTarget(&target))
+	if s := h.status(t); s.CountdownTarget == nil || !s.CountdownTarget.Equal(target) {
+		t.Fatalf("CountdownTarget = %v, want %v", s.CountdownTarget, target)
+	}
+	rs, err := h.st.GetRunState()
+	mustDo(t, "GetRunState", err)
+	if rs.CountdownTarget == nil || !rs.CountdownTarget.Equal(target) {
+		t.Errorf("persisted CountdownTarget = %v, want %v", rs.CountdownTarget, target)
+	}
+}
+
+func TestSetCountdownTarget_NilClearsIt(t *testing.T) {
+	h := newHarness(t, okCheck, "svc1")
+	target := time.Date(2026, 10, 17, 17, 0, 0, 0, time.UTC)
+	mustDo(t, "SetCountdownTarget", h.e.SetCountdownTarget(&target))
+	mustDo(t, "SetCountdownTarget(nil)", h.e.SetCountdownTarget(nil))
+	if s := h.status(t); s.CountdownTarget != nil {
+		t.Errorf("CountdownTarget = %v after clearing, want nil", s.CountdownTarget)
+	}
+}
+
+func TestSetCountdownTarget_LogsAnEvent(t *testing.T) {
+	h := newHarness(t, okCheck, "svc1")
+	// 12:00 in UTC-5, so the message must normalize it to 17:00Z.
+	target := time.Date(2026, 10, 17, 12, 0, 0, 0, time.FixedZone("UTC-5", -5*60*60))
+	mustDo(t, "SetCountdownTarget", h.e.SetCountdownTarget(&target))
+	ev := h.lastEvent(t, EventCountdownChanged)
+	if ev.Actor != "admin" || ev.ServiceID != nil || !strings.Contains(ev.Message, "2026-10-17T17:00:00Z") {
+		t.Errorf("event = %+v, want an admin engine event naming 2026-10-17T17:00:00Z", ev)
+	}
+
+	mustDo(t, "SetCountdownTarget(nil)", h.e.SetCountdownTarget(nil))
+	if ev := h.lastEvent(t, EventCountdownChanged); !strings.Contains(ev.Message, "cleared") {
+		t.Errorf("event after clearing = %+v, want a message saying it was cleared", ev)
 	}
 }
 

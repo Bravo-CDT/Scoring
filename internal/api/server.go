@@ -2,10 +2,11 @@
 // endpoints (status, events, check results) and admin control endpoints
 // behind a bearer token from POST /login.
 //
-// Every response, errors included, is JSON. Public endpoints never expose
-// check or event detail text unless the request carries a valid admin
-// token, and their internal errors are reported with a generic message (the
-// cause is logged instead); admin endpoints report the cause directly.
+// Every response, errors included, is JSON, except those of the optional
+// fallback handler (WithFallback) that unmatched reads go to. Check result
+// detail text is public; event detail text is only exposed to a request
+// carrying a valid admin token. Public endpoints report internal errors with a generic message
+// (the cause is logged instead); admin endpoints report the cause directly.
 package api
 
 import (
@@ -15,6 +16,7 @@ import (
 	"log"
 	"net/http"
 	"strconv"
+	"sync"
 
 	"github.com/Bravo-CDT/Scoring/internal/auth"
 	"github.com/Bravo-CDT/Scoring/internal/engine"
@@ -24,9 +26,13 @@ import (
 const (
 	defaultPageLimit = 50
 	maxPageLimit     = 500
-	// maxBodyBytes bounds every request body the API reads; the largest
-	// legitimate one is a login.
+	// maxBodyBytes bounds every request body the API reads except a config
+	// save; the largest other legitimate one is a login.
 	maxBodyBytes = 4 << 10
+	// maxConfigBodyBytes bounds a POST /config body: a whole config.yaml,
+	// which can legitimately run well past maxBodyBytes as services are
+	// added (config.example.yaml itself is already close to maxBodyBytes).
+	maxConfigBodyBytes = 1 << 20
 
 	genericInternalError = "internal server error"
 )
@@ -40,17 +46,37 @@ type server struct {
 	configPath string
 	logger     *log.Logger
 	mux        *http.ServeMux
+	// fallback, if set, serves GET and HEAD requests that match no route.
+	fallback http.Handler
+	// configWriteMu serializes POST /config's read-compare-write sequence,
+	// so two concurrent saves against the same expected_hash cannot both
+	// read the file before either writes it -- without this, both read the
+	// same "current" hash, both pass the conflict check, and the second
+	// write silently overwrites the first.
+	configWriteMu sync.Mutex
+}
+
+// Option configures NewServer.
+type Option func(*server)
+
+// WithFallback hands GET and HEAD requests whose path matches no API route
+// to h instead of answering them with the API's JSON 404, so the same server
+// can serve the frontend. Requests that match a route path but not its
+// method still get the API's JSON 405, and other methods on unknown paths
+// still get its JSON 404.
+func WithFallback(h http.Handler) Option {
+	return func(s *server) { s.fallback = h }
 }
 
 // NewServer builds the full route table: public read-only endpoints, admin
 // endpoints behind a.RequireAdmin, and /login. configPath is threaded through
 // to the /reload handler; empty means the path the engine was built with.
 // Internal errors are logged with the standard logger.
-func NewServer(e *engine.Engine, st *store.Store, sessionID int64, a *auth.Auth, configPath string) http.Handler {
-	return newServer(e, st, sessionID, a, configPath, log.Default())
+func NewServer(e *engine.Engine, st *store.Store, sessionID int64, a *auth.Auth, configPath string, opts ...Option) http.Handler {
+	return newServer(e, st, sessionID, a, configPath, log.Default(), opts...)
 }
 
-func newServer(e *engine.Engine, st *store.Store, sessionID int64, a *auth.Auth, configPath string, logger *log.Logger) *server {
+func newServer(e *engine.Engine, st *store.Store, sessionID int64, a *auth.Auth, configPath string, logger *log.Logger, opts ...Option) *server {
 	s := &server{
 		engine:     e,
 		store:      st,
@@ -59,6 +85,9 @@ func newServer(e *engine.Engine, st *store.Store, sessionID int64, a *auth.Auth,
 		configPath: configPath,
 		logger:     logger,
 		mux:        http.NewServeMux(),
+	}
+	for _, opt := range opts {
+		opt(s)
 	}
 
 	s.mux.HandleFunc("GET /status", s.handleStatus)
@@ -72,18 +101,26 @@ func newServer(e *engine.Engine, st *store.Store, sessionID int64, a *auth.Auth,
 	admin("POST /engine/stop", s.engineAction(e.Stop))
 	admin("POST /scoring/pause", s.engineAction(e.PauseScoring))
 	admin("POST /scoring/resume", s.engineAction(e.ResumeScoring))
+	admin("POST /countdown", s.handleCountdown)
+	admin("GET /config", s.handleGetConfig)
+	admin("GET /config/status", s.handleConfigStatus)
+	admin("POST /config", s.handleSaveConfig)
 	admin("POST /services/{name}/start", s.handleServiceStart)
 	admin("POST /services/{name}/stop", s.serviceAction(e.StopService))
 	admin("POST /services/{name}/restart", s.handleServiceRestart)
 	admin("POST /services/{name}/scoring/pause", s.serviceAction(e.PauseServiceScoring))
 	admin("POST /services/{name}/scoring/resume", s.serviceAction(e.ResumeServiceScoring))
 	admin("POST /reload", s.handleReload)
+	admin("POST /teams/{side}/adjust", s.handleAdjustScore)
+	admin("POST /backup", s.handleBackup)
+	admin("POST /db/reset-round", s.handleResetRound)
 
 	return s
 }
 
 // ServeHTTP dispatches to the mux, rewriting the mux's own plain-text 404 and
-// 405 responses as JSON (keeping the 405's Allow header).
+// 405 responses as JSON (keeping the 405's Allow header). An unmatched GET or
+// HEAD goes to the fallback instead, if there is one.
 func (s *server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if _, pattern := s.mux.Handler(r); pattern != "" {
 		s.mux.ServeHTTP(w, r)
@@ -91,14 +128,19 @@ func (s *server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	rec := &headerRecorder{header: make(http.Header)}
 	s.mux.ServeHTTP(rec, r)
+	status := rec.status
+	if status == 0 {
+		status = http.StatusNotFound
+	}
+	if status == http.StatusNotFound && s.fallback != nil &&
+		(r.Method == http.MethodGet || r.Method == http.MethodHead) {
+		s.fallback.ServeHTTP(w, r)
+		return
+	}
 	for _, h := range []string{"Allow", "Location"} {
 		if v := rec.header.Get(h); v != "" {
 			w.Header().Set(h, v)
 		}
-	}
-	status := rec.status
-	if status == 0 {
-		status = http.StatusNotFound
 	}
 	writeError(w, status, http.StatusText(status))
 }
@@ -196,7 +238,13 @@ var (
 // of at most maxBodyBytes with no fields dst does not know, into dst. An
 // empty body is errEmptyBody.
 func decodeJSON(w http.ResponseWriter, r *http.Request, dst any) error {
-	r.Body = http.MaxBytesReader(w, r.Body, maxBodyBytes)
+	return decodeJSONLimit(w, r, dst, maxBodyBytes)
+}
+
+// decodeJSONLimit is decodeJSON with a caller-chosen body size limit, for the
+// one route (POST /config) whose legitimate bodies run past maxBodyBytes.
+func decodeJSONLimit(w http.ResponseWriter, r *http.Request, dst any, limit int64) error {
+	r.Body = http.MaxBytesReader(w, r.Body, limit)
 	dec := json.NewDecoder(r.Body)
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(dst); err != nil {

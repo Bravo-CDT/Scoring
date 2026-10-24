@@ -19,6 +19,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"time"
 )
 
 // builtin is one check type the engine ships: its implementation and the
@@ -31,6 +32,10 @@ type builtin struct {
 
 // builtins maps each shipped check type name to its plugin.
 var builtins = map[string]builtin{
+	"dns": {
+		check:    DNS,
+		validate: func(p map[string]any) error { _, err := parseDNSParams(p); return err },
+	},
 	"tcp_connect": {
 		check:    TCPConnect,
 		validate: func(p map[string]any) error { _, err := parseTCPConnectParams(p); return err },
@@ -38,6 +43,34 @@ var builtins = map[string]builtin{
 	"http": {
 		check:    HTTP,
 		validate: func(p map[string]any) error { _, err := parseHTTPParams(p); return err },
+	},
+	"http_exclusive": {
+		check:    HTTPExclusive,
+		validate: func(p map[string]any) error { _, err := parseHTTPExclusiveParams(p); return err },
+	},
+	"ldap": {
+		check:    LDAP,
+		validate: func(p map[string]any) error { _, err := parseLDAPParams(p); return err },
+	},
+	"openfire": {
+		check:    Openfire,
+		validate: func(p map[string]any) error { _, err := parseOpenfireParams(p); return err },
+	},
+	"postgres": {
+		check:    Postgres,
+		validate: func(p map[string]any) error { _, err := parsePostgresParams(p); return err },
+	},
+	"script": {
+		check:    Script,
+		validate: func(p map[string]any) error { _, err := parseScriptParams(p); return err },
+	},
+	"smb": {
+		check:    SMB,
+		validate: func(p map[string]any) error { _, err := parseSMBParams(p); return err },
+	},
+	"smtp": {
+		check:    SMTP,
+		validate: func(p map[string]any) error { _, err := parseSMTPParams(p); return err },
 	},
 }
 
@@ -66,9 +99,21 @@ type Result struct {
 	Detail  string
 }
 
+// RoundResult is one service's outcome for a completed scoring round, as the
+// Scheduler reports it to its ResultSink. It lives here, beside Result, so the
+// scheduler and the scorer can share it without importing each other.
+type RoundResult struct {
+	ServiceID        int64
+	PointsPerFailure int
+	Result           Result
+	Latency          time.Duration
+}
+
 // CheckFunc performs one check attempt. It must return promptly once ctx is
-// done — callers (the Scheduler) rely on this to bound a hung check at the
-// service's interval.
+// done. The Scheduler does not depend on that for correctness — it stops
+// waiting shortly after the deadline and scores the check as a failure — but
+// a CheckFunc that ignores ctx leaks its goroutine for every round it overruns,
+// until it eventually returns on its own.
 type CheckFunc func(ctx context.Context, host string, params map[string]any) Result
 
 // Registry maps check type names to their implementations. It is safe for
@@ -98,8 +143,8 @@ func (r *Registry) Get(name string) (CheckFunc, bool) {
 	return fn, ok
 }
 
-// NewDefaultRegistry returns a Registry with the built-in checks
-// (tcp_connect and http) already registered.
+// NewDefaultRegistry returns a Registry with every built-in check (see
+// builtins) already registered.
 func NewDefaultRegistry() *Registry {
 	r := NewRegistry()
 	for name, b := range builtins {
@@ -143,6 +188,25 @@ func stringParam(params map[string]any, key string) (s string, ok bool, err erro
 		return "", true, fmt.Errorf("param %q must be a string, got %T", key, v)
 	}
 	return s, true, nil
+}
+
+// boolParam reads an optional boolean param. ok reports whether the param
+// was present at all.
+func boolParam(params map[string]any, key string) (b bool, ok bool, err error) {
+	v, ok := params[key]
+	if !ok {
+		return false, false, nil
+	}
+	b, isBool := v.(bool)
+	if !isBool {
+		return false, true, fmt.Errorf("param %q must be a boolean, got %T", key, v)
+	}
+	return b, true, nil
+}
+
+// errMissingRequired builds the standard "missing required param" error.
+func errMissingRequired(key string) error {
+	return fmt.Errorf("missing required param %q", key)
 }
 
 // rejectUnknownParams fails if params has any key not in allowed.

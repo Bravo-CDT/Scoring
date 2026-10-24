@@ -2,9 +2,9 @@
 //
 // Every stack is built by app.New, the same function cmd/scoringengine calls,
 // so these tests exercise the real wiring rather than a copy of it. The only
-// substitutions are the ones app.Options exists for: a fake check registry
-// (always-failing tcp_connect) and no start-up stagger, so the tests are
-// deterministic and fast.
+// substitution is the one app.Options exists for: a fake check registry
+// (always-failing tcp_connect), so the tests are deterministic and touch no
+// real network unless they mean to.
 package e2e
 
 import (
@@ -12,10 +12,13 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"maps"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -24,6 +27,7 @@ import (
 
 	"github.com/Bravo-CDT/Scoring/internal/app"
 	"github.com/Bravo-CDT/Scoring/internal/checks"
+	"github.com/Bravo-CDT/Scoring/internal/store"
 )
 
 const (
@@ -34,28 +38,28 @@ const (
 	startingScore    = 1000
 	pointsPerFailure = 10
 
-	// failDetail is what the fake check reports; it stands in for the
-	// sensitive detail text the public API must never reveal.
-	failDetail = "simulated outage: token=hunter2"
+	// failDetail is what the fake check reports when a service is down.
+	failDetail = "simulated outage: connection refused"
 
-	// waitTimeout bounds every poll. Checks run every second, so anything
+	// waitTimeout bounds every poll. Rounds run every second, so anything
 	// that should happen does so within a couple of seconds.
 	waitTimeout = 10 * time.Second
 	// quietPeriod is how long a negative assertion ("nothing changed") waits:
-	// comfortably more than two check intervals.
+	// comfortably more than two rounds.
 	quietPeriod = 2500 * time.Millisecond
 )
 
-// writeConfig writes a config with one 1-second tcp_connect service per
-// name. The admin hash comes from the environment, as in production.
+// writeConfig writes a config with 1-second rounds and one tcp_connect
+// service per name. The admin hash comes from the environment, as in
+// production.
 func writeConfig(t *testing.T, path string, services ...string) {
 	t.Helper()
 	var b strings.Builder
-	fmt.Fprintf(&b, "session_name: e2e-comp\nstarting_score: %d\n", startingScore)
+	fmt.Fprintf(&b, "session_name: e2e-comp\nstarting_score: %d\nround_interval_seconds: 1\n", startingScore)
 	fmt.Fprintf(&b, "admin:\n  username: %s\n  password_hash: ${%s}\nservices:\n", adminUser, hashEnvVar)
 	for _, name := range services {
 		fmt.Fprintf(&b, "  - name: %s\n    host: 127.0.0.1\n    check_type: tcp_connect\n"+
-			"    interval_seconds: 1\n    points_per_failure: %d\n    params: {port: 9}\n", name, pointsPerFailure)
+			"    points_per_failure: %d\n    params: {port: 9}\n", name, pointsPerFailure)
 	}
 	if err := os.WriteFile(path, []byte(b.String()), 0o600); err != nil {
 		t.Fatalf("writing config: %v", err)
@@ -87,12 +91,10 @@ func newStack(t *testing.T, dbPath, configPath string) *stack {
 
 func newStackWithRegistry(t *testing.T, dbPath, configPath string, registry *checks.Registry) *stack {
 	t.Helper()
-	noStagger := time.Duration(0)
 	a, err := app.New(app.Options{
 		ConfigPath: configPath,
 		DBPath:     dbPath,
 		Registry:   registry,
-		MaxStagger: &noStagger,
 	})
 	if err != nil {
 		t.Fatalf("app.New: %v", err)
@@ -103,7 +105,7 @@ func newStackWithRegistry(t *testing.T, dbPath, configPath string, registry *che
 }
 
 // close shuts the stack down the way main does: stop serving, then stop the
-// engine and close the store.
+// round loop and the engine and close the store.
 func (s *stack) close() {
 	if s.closed {
 		return
@@ -348,15 +350,10 @@ func TestEndToEnd_LifecycleAndRestart(t *testing.T) {
 	beforeSvc3 := s1.status().BlueScore
 	waitFor(t, "svc3 failures to deduct points", func() bool { return s1.status().BlueScore < beforeSvc3 })
 
-	t.Log("detail text: hidden from the public, shown to the admin")
-	for _, r := range s1.results("svc1", "") {
-		if r.Detail != nil {
-			t.Fatalf("public result #%d exposes detail %q", r.ID, *r.Detail)
-		}
-	}
-	adminView := s1.results("svc1", token)
-	if len(adminView) == 0 || adminView[0].Detail == nil || *adminView[0].Detail != failDetail {
-		t.Fatalf("admin view of svc1 results lacks the check detail: %+v", adminView)
+	t.Log("detail text: check results show it to everyone, events only to the admin")
+	publicView := s1.results("svc1", "")
+	if len(publicView) == 0 || publicView[0].Detail == nil || *publicView[0].Detail != failDetail {
+		t.Fatalf("public view of svc1 results lacks the check detail: %+v", publicView)
 	}
 	var events []map[string]any
 	s1.do(http.MethodGet, "/events?limit=500", "", nil, &events)
@@ -487,64 +484,153 @@ func countEvents(events []map[string]any, eventType string) int {
 	return n
 }
 
-// TestEndToEnd_MassFailureIgnoresStoppedRoutines checks that app wires the
-// scheduler's running state into the scorer: a routine an admin stopped while
-// it was failing must drop out of the mass-failure share, rather than keep
-// counting its stale failure for the rest of the competition.
-func TestEndToEnd_MassFailureIgnoresStoppedRoutines(t *testing.T) {
+// storedResults returns a service's whole check history straight from the
+// store, newest first, with the round numbers the API does not show.
+func (s *stack) storedResults(name string) []store.CheckResult {
+	s.t.Helper()
+	svc, ok, err := s.app.Store.GetServiceByName(s.app.Session.ID, name)
+	if err != nil || !ok {
+		s.t.Fatalf("GetServiceByName(%q): found=%v err=%v", name, ok, err)
+	}
+	results, err := s.app.Store.ListCheckResults(svc.ID, 1000, 0)
+	if err != nil {
+		s.t.Fatalf("ListCheckResults(%q): %v", name, err)
+	}
+	return results
+}
+
+// latestRound is the round of a service's newest stored result, 0 if none.
+func (s *stack) latestRound(name string) int {
+	s.t.Helper()
+	if rs := s.storedResults(name); len(rs) > 0 {
+		return rs[0].Round
+	}
+	return 0
+}
+
+// listen opens a TCP listener on a free local port that accepts and drops
+// every connection, for a real tcp_connect check to pass against, and returns
+// its port.
+func listen(t *testing.T) int {
+	t.Helper()
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	t.Cleanup(func() { l.Close() })
+	go func() {
+		for {
+			c, err := l.Accept()
+			if err != nil {
+				return
+			}
+			c.Close()
+		}
+	}()
+	return l.Addr().(*net.TCPAddr).Port
+}
+
+// writeListenerConfig writes a config with 1-second rounds and one tcp_connect
+// service per entry of ports, each pointed at its local port.
+func writeListenerConfig(t *testing.T, path string, ports map[string]int) {
+	t.Helper()
+	var b strings.Builder
+	fmt.Fprintf(&b, "session_name: e2e-comp\nstarting_score: %d\nround_interval_seconds: 1\n", startingScore)
+	fmt.Fprintf(&b, "admin:\n  username: %s\n  password_hash: ${%s}\nservices:\n", adminUser, hashEnvVar)
+	for _, name := range slices.Sorted(maps.Keys(ports)) {
+		fmt.Fprintf(&b, "  - name: %s\n    host: 127.0.0.1\n    check_type: tcp_connect\n"+
+			"    points_per_failure: %d\n    params: {port: %d}\n", name, pointsPerFailure, ports[name])
+	}
+	if err := os.WriteFile(path, []byte(b.String()), 0o600); err != nil {
+		t.Fatalf("writing config: %v", err)
+	}
+}
+
+// TestEndToEnd_ServicesCheckInLockstep runs two real tcp_connect checks for
+// several rounds and checks that, once both are checking, every round holds
+// exactly one result for each, stamped with the same instant: the services
+// never drift apart.
+func TestEndToEnd_ServicesCheckInLockstep(t *testing.T) {
 	setAdminHash(t)
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, "config.yaml")
-	// tcp_connect fails on port 9 and passes on any other, so a service's
-	// outcome is set by its config entry.
-	r := checks.NewRegistry()
-	r.Register("tcp_connect", func(_ context.Context, _ string, params map[string]any) checks.Result {
-		if params["port"] == 9 {
-			return checks.Result{Success: false, Detail: failDetail}
-		}
-		return checks.Result{Success: true, Detail: "ok"}
+	writeListenerConfig(t, configPath, map[string]int{"web": listen(t), "ssh": listen(t)})
+
+	s := newStackWithRegistry(t, filepath.Join(dir, "scoring.db"), configPath, checks.NewDefaultRegistry())
+	s.admin(s.login(), "/engine/start")
+	// 4, not 3: round 1 may hold only one service (see below), and this
+	// still leaves at least two shared rounds to compare.
+	waitFor(t, "4 rounds holding both services", func() bool {
+		return min(s.latestRound("web"), s.latestRound("ssh")) >= 4
 	})
-	writePorts := func(ports map[string]int) {
-		t.Helper()
-		var b strings.Builder
-		fmt.Fprintf(&b, "session_name: e2e-comp\nstarting_score: %d\nmass_failure_fraction: 0.5\n", startingScore)
-		fmt.Fprintf(&b, "admin:\n  username: %s\n  password_hash: ${%s}\nservices:\n", adminUser, hashEnvVar)
-		for _, name := range []string{"down", "up1", "up2", "up3"} {
-			fmt.Fprintf(&b, "  - name: %s\n    host: 127.0.0.1\n    check_type: tcp_connect\n"+
-				"    interval_seconds: 1\n    points_per_failure: %d\n    params: {port: %d}\n", name, pointsPerFailure, ports[name])
+
+	byRound := func(name string) map[int]store.CheckResult {
+		out := make(map[int]store.CheckResult)
+		for _, r := range s.storedResults(name) {
+			if prev, dup := out[r.Round]; dup {
+				t.Fatalf("%s has two results for round %d: #%d and #%d", name, r.Round, prev.ID, r.ID)
+			}
+			if !r.Success {
+				t.Errorf("%s round %d failed (%q), want a pass against its listener", name, r.Round, r.Detail)
+			}
+			out[r.Round] = r
 		}
-		if err := os.WriteFile(configPath, []byte(b.String()), 0o600); err != nil {
-			t.Fatalf("writing config: %v", err)
+		return out
+	}
+	web, ssh := byRound("web"), byRound("ssh")
+	// Start enables services one at a time, so a round can begin between
+	// the two and hold only one of them: compare from the first round both
+	// services are in. The newest round may still be being written as we
+	// read: compare up to the last one both services had finished.
+	first := max(slices.Min(slices.Collect(maps.Keys(web))), slices.Min(slices.Collect(maps.Keys(ssh))))
+	last := min(slices.Max(slices.Collect(maps.Keys(web))), slices.Max(slices.Collect(maps.Keys(ssh))))
+	if last-first < 1 {
+		t.Fatalf("only rounds %d..%d hold both services, want at least two to compare", first, last)
+	}
+	for round := first; round <= last; round++ {
+		w, wok := web[round]
+		h, hok := ssh[round]
+		if !wok || !hok {
+			t.Errorf("round %d: web present %v, ssh present %v; want both", round, wok, hok)
+			continue
+		}
+		if !w.Timestamp.Equal(h.Timestamp) {
+			t.Errorf("round %d: web stamped %v, ssh %v; want one shared round start", round, w.Timestamp, h.Timestamp)
 		}
 	}
-	writePorts(map[string]int{"down": 9, "up1": 10, "up2": 10, "up3": 10})
+}
 
-	s := newStackWithRegistry(t, filepath.Join(dir, "scoring.db"), configPath, r)
-	token := s.login()
-	s.admin(token, "/engine/start")
-	s.admin(token, "/scoring/resume")
-	for _, name := range []string{"down", "up1", "up2", "up3"} {
-		s.awaitNewResults(name, 1) // 1 of 4 failing arms the safety net
-	}
-	if s.status().ScoringPaused {
-		t.Fatal("autopaused at 1 of 4 failing with threshold 0.5")
-	}
+// TestEndToEnd_RoundNumberResumesAcrossARestart checks that a restarted
+// process carries on numbering rounds from where the last one stopped,
+// rather than starting again at 1.
+func TestEndToEnd_RoundNumberResumesAcrossARestart(t *testing.T) {
+	setAdminHash(t)
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "scoring.db")
+	configPath := filepath.Join(dir, "config.yaml")
+	writeConfig(t, configPath, "svc1")
 
-	// Stop the failing routine, then make up1 fail. Counting only running
-	// routines that is 1 of 3; counting the stopped one's stale failure too
-	// it would be 2 of 4, which meets the threshold and would autopause.
-	s.admin(token, "/services/down/stop")
-	writePorts(map[string]int{"down": 9, "up1": 9, "up2": 10, "up3": 10})
-	s.admin(token, "/services/up1/restart")
-	s.awaitNewResults("up1", 3)
+	s1 := newStack(t, dbPath, configPath)
+	s1.admin(s1.login(), "/engine/start")
+	waitFor(t, "2 rounds before the restart", func() bool { return s1.latestRound("svc1") >= 2 })
+	s1.close()
 
-	if s.status().ScoringPaused {
-		t.Fatal("autopaused: the stopped routine's stale failure was counted")
+	s2 := newStack(t, dbPath, configPath)
+	// Read once the first process is gone, so no round of its can still land.
+	before := s2.latestRound("svc1")
+	s2.admin(s2.login(), "/engine/start")
+	waitFor(t, "a round after the restart", func() bool { return s2.latestRound("svc1") > before })
+
+	// History is newest first; the earliest round past before is the
+	// restarted process's first.
+	first := 0
+	for _, r := range s2.storedResults("svc1") {
+		if r.Round > before {
+			first = r.Round
+		}
 	}
-	var events []map[string]any
-	s.do(http.MethodGet, "/events?limit=500", "", nil, &events)
-	if hasEvent(events, "mass_failure_autopause") {
-		t.Fatalf("mass_failure_autopause logged although only 1 of 3 running services is failing: %v", events)
+	if first != before+1 {
+		t.Errorf("first round after the restart = %d, want %d (one past the last round before it)", first, before+1)
 	}
 }
 
@@ -588,6 +674,66 @@ func TestEndToEnd_BootAndShutdownEvents(t *testing.T) {
 	}
 	if ev := firstEvent(events, "service_added"); ev == nil || ev["actor"] != "system" {
 		t.Errorf("startup service_added = %v, want one by system", ev)
+	}
+}
+
+// TestEndToEnd_ServesTheFrontendBesideTheAPI checks the WebDir wiring: the
+// built frontend answers its own files and every client-side route, while
+// the API's routes and JSON errors are untouched.
+func TestEndToEnd_ServesTheFrontendBesideTheAPI(t *testing.T) {
+	setAdminHash(t)
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.yaml")
+	writeConfig(t, configPath, "svc1")
+	webDir := filepath.Join(dir, "dist")
+	if err := os.MkdirAll(filepath.Join(webDir, "assets"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for name, contents := range map[string]string{"index.html": "<html>app</html>", "assets/app.js": "app()"} {
+		if err := os.WriteFile(filepath.Join(webDir, name), []byte(contents), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	a, err := app.New(app.Options{
+		ConfigPath: configPath,
+		DBPath:     filepath.Join(dir, "scoring.db"),
+		WebDir:     webDir,
+		Registry:   failingRegistry(),
+	})
+	if err != nil {
+		t.Fatalf("app.New: %v", err)
+	}
+	s := &stack{t: t, app: a, server: httptest.NewServer(a.Handler)}
+	t.Cleanup(s.close)
+
+	get := func(method, path string) (int, string, string) {
+		t.Helper()
+		req, err := http.NewRequest(method, s.server.URL+path, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("%s %s: %v", method, path, err)
+		}
+		defer resp.Body.Close()
+		var body bytes.Buffer
+		if _, err := body.ReadFrom(resp.Body); err != nil {
+			t.Fatal(err)
+		}
+		return resp.StatusCode, resp.Header.Get("Content-Type"), body.String()
+	}
+
+	for path, want := range map[string]string{"/": "<html>app</html>", "/admin": "<html>app</html>", "/assets/app.js": "app()"} {
+		if code, _, body := get(http.MethodGet, path); code != http.StatusOK || body != want {
+			t.Errorf("GET %s = %d %q, want 200 %q", path, code, body, want)
+		}
+	}
+	if st := s.status(); st.BlueScore != startingScore {
+		t.Errorf("GET /status blue_score = %d, want %d", st.BlueScore, startingScore)
+	}
+	if code, ct, _ := get(http.MethodPost, "/admin"); code != http.StatusNotFound || ct != "application/json" {
+		t.Errorf("POST /admin = %d %s, want the API's JSON 404", code, ct)
 	}
 }
 
