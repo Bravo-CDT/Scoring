@@ -87,6 +87,11 @@ type Scheduler struct {
 	// not even one from a round that ended just before the stop.
 	recordMu sync.Mutex
 
+	// roundNow, when signalled, cuts the round loop's wait short so the next
+	// round begins at once (see StartRoundNow). Buffered so a signal sent
+	// while a round runs is taken as soon as it ends.
+	roundNow chan struct{}
+
 	// statusMu guards lastRound, nextRound and nextRoundAt.
 	statusMu    sync.Mutex
 	lastRound   int
@@ -106,6 +111,7 @@ func New(registry *checks.Registry, sink ResultSink, configPath string, roundInt
 		enabled:       make(map[int64]enabledService),
 		inRound:       make(map[int64]context.CancelFunc),
 		opLocks:       make(map[int64]*sync.Mutex),
+		roundNow:      make(chan struct{}, 1),
 	}
 }
 
@@ -141,7 +147,7 @@ func (s *Scheduler) Run(ctx context.Context, firstRound int) <-chan struct{} {
 				}
 				s.statusMu.Unlock()
 			}
-			if !sleep(ctx, time.Until(start.Add(s.roundInterval))) {
+			if !s.waitForNextRound(ctx, time.Until(start.Add(s.roundInterval))) {
 				return
 			}
 		}
@@ -268,6 +274,16 @@ func (s *Scheduler) publishProjectedRoundStatus(start time.Time) {
 	s.statusMu.Lock()
 	s.nextRoundAt = start.Add(s.roundInterval)
 	s.statusMu.Unlock()
+}
+
+// StartRoundNow begins the next round at once rather than at the next tick,
+// and the round clock runs from it: rounds follow every round interval after
+// it. If a round is in progress, the next one begins as soon as it ends.
+func (s *Scheduler) StartRoundNow() {
+	select {
+	case s.roundNow <- struct{}{}:
+	default: // already signalled
+	}
 }
 
 // ResetRounds makes the next recorded round number 1 again and reports round
@@ -476,9 +492,9 @@ func withTimeoutDetail(checkCtx context.Context, timeout time.Duration, result c
 	return checks.Result{Success: false, Detail: detail}
 }
 
-// sleep waits for d or until ctx is done, reporting whether it slept the full
-// duration. A non-positive d returns immediately.
-func sleep(ctx context.Context, d time.Duration) bool {
+// waitForNextRound waits for d, or less if StartRoundNow is called, and
+// reports false once ctx is done. A non-positive d returns immediately.
+func (s *Scheduler) waitForNextRound(ctx context.Context, d time.Duration) bool {
 	if d <= 0 {
 		return ctx.Err() == nil
 	}
@@ -487,6 +503,8 @@ func sleep(ctx context.Context, d time.Duration) bool {
 	select {
 	case <-t.C:
 		return true
+	case <-s.roundNow:
+		return ctx.Err() == nil
 	case <-ctx.Done():
 		return false
 	}

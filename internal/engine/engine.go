@@ -180,7 +180,8 @@ func New(st *store.Store, sess store.Session, sched *scheduler.Scheduler, config
 
 // Start marks the engine running and starts the routine of every active
 // service an admin has not stopped. It leaves scoring paused or not as it
-// was: resuming scoring is a separate decision (ResumeScoring).
+// was: resuming scoring is a separate decision (ResumeScoring). Starting a
+// stopped engine runs a round at once and times the following rounds from it.
 //
 // A service whose routine fails to start (its config entry is missing, say) is
 // logged as an error event, skipped and returned in failed (non-nil, empty
@@ -217,6 +218,9 @@ func (e *Engine) Start() (failed []StartFailure, err error) {
 	if rs.EngineState == store.EngineRunning {
 		return failed, nil
 	}
+	// Check right away rather than at the round loop's next tick, and time
+	// the rounds from here.
+	e.scheduler.StartRoundNow()
 	return failed, e.logEngineEvent(ActorAdmin, EventEngineStarted, "engine started")
 }
 

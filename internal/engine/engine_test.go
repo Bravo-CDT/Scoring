@@ -471,11 +471,11 @@ func TestStatus_CheckingReflectsAnInFlightCheck(t *testing.T) {
 		return checks.Result{Success: true}
 	}
 	h := newHarness(t, slowCheck, "svc1")
-	h.start(t)
-
 	if h.status(t).Services[0].Checking {
-		t.Fatal("Checking is true before svc1's first check has even started")
+		t.Fatal("Checking is true before the engine has started")
 	}
+	h.start(t) // starting the engine runs a round at once
+
 	<-checkStarted
 	if !h.status(t).Services[0].Checking {
 		t.Fatal("Checking is false while svc1's check is still running")

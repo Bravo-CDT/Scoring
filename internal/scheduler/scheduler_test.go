@@ -903,3 +903,22 @@ func TestConcurrentStartStopRestart(t *testing.T) {
 		}
 	}
 }
+
+// StartRoundNow runs a round at once instead of waiting out the current tick,
+// and the rounds after it are timed from it.
+func TestStartRoundNow_RunsARoundImmediatelyAndRetimesTheClock(t *testing.T) {
+	sink := &fakeSink{}
+	s := newScheduler(t, registryWith(okCheck), sink, newConfig(t), time.Hour)
+	runFrom(t, s, 1)
+	// Let the loop take its first (idle) tick, so it is waiting out the hour.
+	waitFor(t, "the first tick", func() bool { _, next := s.RoundStatus(); return !next.IsZero() })
+	mustStart(t, s, 1, "svc1")
+
+	kicked := time.Now()
+	s.StartRoundNow()
+	waitFor(t, "a round right after StartRoundNow", func() bool { return sink.count() == 1 })
+	_, next := s.RoundStatus()
+	if next.Before(kicked.Add(time.Hour)) {
+		t.Errorf("next round at %v, want an hour after the immediate round (after %v)", next, kicked.Add(time.Hour))
+	}
+}
