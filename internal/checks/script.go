@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strings"
 	"syscall"
@@ -47,7 +48,7 @@ const (
 //     resolves against the working directory. Once symlinks are followed it
 //     must name an executable file inside ScriptDir.
 //   - env (map, optional): extra environment variables, values string, int
-//     or bool. They may not set PATH, HOME or any LD_* variable.
+//     or bool. Every name must match ^CHECK_[A-Z0-9_]+$ (see scriptEnvName).
 //
 // Any other param is rejected.
 //
@@ -205,6 +206,15 @@ func resolvePath(path string) (string, error) {
 	return filepath.EvalSymlinks(abs)
 }
 
+// scriptEnvName is the allowlist for env names. It is an allowlist, not a
+// deny-list, because many ordinary names turn their value into code run by
+// the script's interpreter before the script itself: BASH_ENV and
+// BASH_FUNC_*%% for bash, ENV for sh, PYTHONSTARTUP, PERL5OPT, NODE_OPTIONS,
+// TCLLIBPATH for expect, LD_PRELOAD for the dynamic linker, and so on. With a
+// deny-list, a config edit through the admin console could still run any
+// code on the scoring box; no interpreter gives a CHECK_ name meaning.
+var scriptEnvName = regexp.MustCompile(`^CHECK_[A-Z0-9_]+$`)
+
 // parseScriptEnv reads the optional "env" param as sorted "K=V" pairs. Errors
 // name the offending key but never a value, which may be a credential.
 func parseScriptEnv(params map[string]any) ([]string, error) {
@@ -218,12 +228,8 @@ func parseScriptEnv(params map[string]any) ([]string, error) {
 	}
 	env := make([]string, 0, len(m))
 	for key, val := range m {
-		upper := strings.ToUpper(key)
-		switch {
-		case key == "" || strings.ContainsAny(key, "=\x00"):
-			return nil, fmt.Errorf("param %q: invalid variable name %q", "env", key)
-		case upper == "PATH" || upper == "HOME" || strings.HasPrefix(upper, "LD_"):
-			return nil, fmt.Errorf("param %q may not set %q (PATH, HOME and LD_* are reserved)", "env", key)
+		if !scriptEnvName.MatchString(key) {
+			return nil, fmt.Errorf("param %q: variable name %q must match %s", "env", key, scriptEnvName)
 		}
 		switch val.(type) {
 		case string, int, int64, bool:

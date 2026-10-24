@@ -59,8 +59,8 @@ func TestScript_NoOutput(t *testing.T) {
 
 func TestScript_GetsHostAndEnvOnly(t *testing.T) {
 	t.Setenv("ADMIN_PASSWORD_HASH", "secret")
-	path := writeScript(t, useScriptDir(t), "env.sh", `echo "$1 $FOO ${ADMIN_PASSWORD_HASH:-unset}"`)
-	res := Script(context.Background(), "10.1.2.3", map[string]any{"script": path, "env": map[string]any{"FOO": "bar"}})
+	path := writeScript(t, useScriptDir(t), "env.sh", `echo "$1 $CHECK_FOO ${ADMIN_PASSWORD_HASH:-unset}"`)
+	res := Script(context.Background(), "10.1.2.3", map[string]any{"script": path, "env": map[string]any{"CHECK_FOO": "bar"}})
 	if !res.Success || res.Detail != "10.1.2.3 bar unset" {
 		t.Errorf("result = %+v, want success with Detail %q", res, "10.1.2.3 bar unset")
 	}
@@ -127,7 +127,7 @@ func TestScript_Params(t *testing.T) {
 	valid := []map[string]any{
 		{"script": ok},
 		{"script": "ok.sh"},
-		{"script": ok, "env": map[string]any{"USER": "sandy", "N": 3, "B": true}},
+		{"script": ok, "env": map[string]any{"CHECK_USER": "sandy", "CHECK_N": 3, "CHECK_B": true}},
 	}
 	for _, params := range valid {
 		if err := ValidateParams("script", params); err != nil {
@@ -150,8 +150,13 @@ func TestScript_Params(t *testing.T) {
 		{"env PATH", map[string]any{"script": ok, "env": map[string]any{"PATH": "x"}}, `"PATH"`},
 		{"env HOME", map[string]any{"script": ok, "env": map[string]any{"HOME": "x"}}, `"HOME"`},
 		{"env LD_PRELOAD", map[string]any{"script": ok, "env": map[string]any{"LD_PRELOAD": "x"}}, `"LD_PRELOAD"`},
+		{"env BASH_ENV", map[string]any{"script": ok, "env": map[string]any{"BASH_ENV": "x"}}, `"BASH_ENV"`},
+		{"env BASH_FUNC", map[string]any{"script": ok, "env": map[string]any{"BASH_FUNC_hostname%%": "() { :; }"}}, `"BASH_FUNC_hostname%%"`},
+		{"env PYTHONSTARTUP", map[string]any{"script": ok, "env": map[string]any{"PYTHONSTARTUP": "x"}}, `"PYTHONSTARTUP"`},
+		{"env lowercase check_", map[string]any{"script": ok, "env": map[string]any{"check_foo": "x"}}, "CHECK_"},
+		{"env bare CHECK_", map[string]any{"script": ok, "env": map[string]any{"CHECK_": "x"}}, "CHECK_"},
 		{"env not a map", map[string]any{"script": ok, "env": "notamap"}, `"env"`},
-		{"env value wrong type", map[string]any{"script": ok, "env": map[string]any{"X": 1.5}}, `"X"`},
+		{"env value wrong type", map[string]any{"script": ok, "env": map[string]any{"CHECK_X": 1.5}}, `"CHECK_X"`},
 		{"unknown param", map[string]any{"script": ok, "args": "x"}, `"args"`},
 	}
 	for _, tt := range tests {
