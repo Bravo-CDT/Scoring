@@ -1,0 +1,9 @@
+# apt packages the checks/ scripts need on the Ubuntu 24.04 scoring box.
+# Install once with `make check-deps`. One package per line; # comments ok.
+#
+#   expect           -- runs checks/telnet.exp
+#   telnet           -- the telnet client it drives
+#   python3-impacket -- ships /usr/bin/impacket-rpcdump for checks/ca_rpc.sh
+expect
+telnet
+python3-impacket

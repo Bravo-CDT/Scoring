@@ -1,0 +1,119 @@
+#!/usr/bin/expect -f
+#
+# telnet.exp <host> -- score a telnet service by logging in and confirming
+# the identity of the resulting shell.
+#
+# Run by the engine's script check as `telnet.exp <host>`; host is the only
+# argument. Environment is only PATH and HOME plus the configured CHECK_*
+# vars. Exit 0 = up, non-zero = down; the last line printed becomes the
+# public scoreboard Detail, so it must never leak the password.
+#
+# Env: CHECK_USER, CHECK_PASSWORD (required); CHECK_PORT (optional, default
+# 23); CHECK_EXPECT_HOSTNAME (optional -- if set, `hostname` must match it).
+#
+# log_user 0 keeps the spawned telnet session (banner, and the password we
+# send) out of our own stdout, so nothing sensitive can reach the Detail.
+
+log_user 0
+set timeout 10
+
+# fail prints one line and exits non-zero (a "down" with a public reason).
+proc fail {msg} {
+	puts $msg
+	exit 1
+}
+
+# require_env returns a non-empty env var or fails with a single line.
+proc require_env {name} {
+	global env
+	if {![info exists env($name)] || $env($name) eq ""} {
+		fail "$name not set"
+	}
+	return $env($name)
+}
+
+set host [lindex $argv 0]
+if {$host eq ""} {
+	fail "no host given"
+}
+
+set user [require_env CHECK_USER]
+set password [require_env CHECK_PASSWORD]
+
+if {[info exists env(CHECK_PORT)] && $env(CHECK_PORT) ne ""} {
+	set port $env(CHECK_PORT)
+} else {
+	set port 23
+}
+
+if {[info exists env(CHECK_EXPECT_HOSTNAME)]} {
+	set expect_hostname $env(CHECK_EXPECT_HOSTNAME)
+} else {
+	set expect_hostname ""
+}
+
+spawn telnet $host $port
+
+expect {
+	"login:" { send "$user\r" }
+	timeout { fail "timed out waiting for the login prompt" }
+	eof { fail "connection closed before the login prompt" }
+}
+
+expect {
+	"Password:" { send "$password\r" }
+	timeout { fail "timed out waiting for the password prompt" }
+	eof { fail "connection closed before the password prompt" }
+}
+
+# After the password, we either reach the shell prompt (a two-line prompt
+# ending in "$ ") or login is rejected. Match the real "$ " at the end of
+# the buffer, not any stray "$" in the login banner.
+expect {
+	-re {\$ $} { }
+	"Login incorrect" { fail "login rejected for $user" }
+	timeout { fail "timed out waiting for the shell prompt after login" }
+	eof { fail "connection closed before the shell prompt" }
+}
+
+send "hostname;whoami\r"
+expect {
+	-re {\$ $} { }
+	timeout { fail "timed out waiting for the output of hostname;whoami" }
+	eof { fail "connection closed before the output of hostname;whoami" }
+}
+set output $expect_out(buffer)
+
+send "exit\r"
+
+# The captured buffer holds the echoed command, the two output lines, a
+# blank line, and the next prompt, each ending in \r\n. Strip the \r, drop
+# blanks, the echoed command, the "user@host /" prompt line, the "$" line,
+# and any "-bash:" missing-tool noise; what remains is hostname then whoami.
+set lines {}
+foreach line [split $output "\n"] {
+	set line [string trim $line "\r"]
+	set line [string trim $line]
+	if {$line eq ""} { continue }
+	if {[string match "*hostname;whoami*" $line]} { continue }
+	if {[string match "*@*" $line]} { continue }
+	if {[string match {$*} $line]} { continue }
+	if {[string match "-bash:*" $line]} { continue }
+	lappend lines $line
+}
+
+if {[llength $lines] < 2} {
+	fail "could not read hostname and whoami from the shell"
+}
+set got_hostname [lindex $lines 0]
+set got_whoami [lindex $lines 1]
+
+if {$got_whoami ne $user} {
+	fail "whoami returned $got_whoami, expected $user"
+}
+if {$expect_hostname ne "" && $got_hostname ne $expect_hostname} {
+	fail "hostname returned $got_hostname, expected $expect_hostname"
+}
+
+puts "logged in as $user on $got_hostname"
+exit 0

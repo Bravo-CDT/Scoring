@@ -1,4 +1,4 @@
-.PHONY: help build build-web dev run hash demo-targets stop-demo-targets clean reset-db
+.PHONY: help build build-web dev run hash check-deps demo-targets stop-demo-targets clean reset-db
 
 BIN    := bin/scoringengine
 CONFIG ?= config.yaml
@@ -17,6 +17,8 @@ help:
 	@echo "  make dev                   run the frontend's hot-reloading dev server, proxying"
 	@echo "                             API requests to an engine started with 'make run'"
 	@echo "  make hash PASSWORD=x       print a bcrypt hash of x for admin.password_hash"
+	@echo "  make check-deps            apt-install the tools the checks/ scripts need"
+	@echo "                             (run once per scoring box)"
 	@echo "  make demo-targets          start three fake local services to point demo checks at"
 	@echo "  make stop-demo-targets     stop them"
 	@echo "  make clean                 remove the built binary, frontend build, and"
@@ -50,6 +52,9 @@ run: build
 hash:
 	@test -n "$(PASSWORD)" || { echo "usage: make hash PASSWORD=yourpassword"; exit 1; }
 	@go run ./scripts/hashpw "$(PASSWORD)"
+
+check-deps:
+	sudo apt-get install -y $$(grep -v '^\s*#' checks/apt-packages.txt)
 
 demo-targets:
 	@scripts/demo-targets.sh up
