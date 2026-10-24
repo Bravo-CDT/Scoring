@@ -5,6 +5,9 @@
 // The engine always starts STOPPED with scoring PAUSED, even after a crash
 // mid-competition. An admin must POST /login, then /engine/start (checks
 // begin), then /scoring/resume (failures begin costing points).
+//
+// `scoringengine check [-config config.yaml] [service ...]` instead runs the
+// configured checks once by hand and prints the results (see check.go).
 package main
 
 import (
@@ -37,6 +40,10 @@ const (
 )
 
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "check" {
+		os.Exit(runCheckCmd(os.Args[2:]))
+	}
+
 	configPath := flag.String("config", "config.yaml", "path to the config file")
 	dbPath := flag.String("db", "scoring.db", "path to the SQLite database file (its directory must exist)")
 	addr := flag.String("addr", ":8080", "HTTP listen address")

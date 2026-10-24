@@ -10,7 +10,7 @@
 // boundary; stopping one mid-round removes it from the round in progress, and
 // its result is discarded.
 //
-// Every check is hard-bounded (see runCheck): it is given the round interval
+// Every check is hard-bounded (see RunCheck): it is given the round interval
 // as its deadline, and the loop stops waiting for it a short grace period
 // after that, however its CheckFunc behaves. That bound is what lets the loop
 // simply wait for all of a round's checks — one service's hung check can delay
@@ -30,7 +30,7 @@ import (
 	"github.com/Bravo-CDT/Scoring/internal/config"
 )
 
-// checkGrace is how long runCheck keeps waiting for a check after its
+// checkGrace is how long RunCheck keeps waiting for a check after its
 // deadline before giving up on it and reporting a failure.
 const checkGrace = 100 * time.Millisecond
 
@@ -204,7 +204,7 @@ func (s *Scheduler) endRound() map[int64]bool {
 
 // runChecks runs every service in batch concurrently, each under its own
 // context from ctxs, and returns their results in ascending service ID order.
-// It returns once every check has: runCheck bounds each one at the round
+// It returns once every check has: RunCheck bounds each one at the round
 // interval plus checkGrace, whatever its CheckFunc does.
 func (s *Scheduler) runChecks(ctxs map[int64]context.Context, batch map[int64]enabledService) []checks.RoundResult {
 	var (
@@ -215,7 +215,7 @@ func (s *Scheduler) runChecks(ctxs map[int64]context.Context, batch map[int64]en
 	for id, svc := range batch {
 		wg.Go(func() {
 			start := time.Now()
-			result := runCheck(ctxs[id], s.roundInterval, svc.fn, svc.cfg.Host, svc.cfg.Params)
+			result := RunCheck(ctxs[id], s.roundInterval, svc.fn, svc.cfg.Host, svc.cfg.Params)
 			r := checks.RoundResult{
 				ServiceID:        id,
 				PointsPerFailure: svc.cfg.PointsPerFailure,
@@ -387,20 +387,21 @@ func (s *Scheduler) stop(serviceID int64) {
 	s.recordMu.Unlock()
 }
 
-// runCheck runs fn under a deadline of timeout and returns its result, or a
+// RunCheck runs fn under a deadline of timeout and returns its result, or a
 // failure if fn panics, runs past the deadline, or does not return within
 // checkGrace of the deadline. It always returns by then, which is what lets
-// the round loop wait for every check of a round.
+// the round loop wait for every check of a round. scoringengine check runs
+// checks by hand through it too, so they get the answer a round would.
 //
-// fn runs on a goroutine of its own so that runCheck can stop waiting for it.
+// fn runs on a goroutine of its own so that RunCheck can stop waiting for it.
 // A CheckFunc that ignores its ctx (which checks.CheckFunc forbids) therefore
 // leaks that goroutine, once per round it overruns, until it returns on its
 // own; no shipped check does.
-func runCheck(ctx context.Context, timeout time.Duration, fn checks.CheckFunc, host string, params map[string]any) checks.Result {
+func RunCheck(ctx context.Context, timeout time.Duration, fn checks.CheckFunc, host string, params map[string]any) checks.Result {
 	checkCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	// Buffered, so a check that returns after runCheck has given up can
+	// Buffered, so a check that returns after RunCheck has given up can
 	// still send and exit.
 	done := make(chan checks.Result, 1)
 	go func() {

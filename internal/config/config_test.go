@@ -564,3 +564,28 @@ func TestLoadService_InvalidConfigIsNotServiceNotFound(t *testing.T) {
 		t.Errorf("error = %v, want a validation error distinct from ErrServiceNotFound", err)
 	}
 }
+
+// The check command must run without the admin hash in its environment: an
+// unset ${VAR} is reported, not fatal, and the admin section is not checked.
+// Services are still validated exactly as Load validates them.
+func TestLoadForChecks_ToleratesUnsetAdminHash(t *testing.T) {
+	const unsetVar = "SOME_UNSET_VAR_XYZ"
+	os.Unsetenv(unsetVar)
+	yml := strings.Replace(minimalYAML, "${TEST_ADMIN_HASH}", "${"+unsetVar+"}", 1)
+
+	cfg, unset, err := LoadForChecks(writeTemp(t, yml))
+	if err != nil {
+		t.Fatalf("LoadForChecks: %v", err)
+	}
+	if !slices.Equal(unset, []string{unsetVar}) {
+		t.Errorf("unsetVars = %v, want [%s]", unset, unsetVar)
+	}
+	if len(cfg.Services) != 1 || cfg.Services[0].Name != "svc1" {
+		t.Errorf("services = %+v, want the one svc1", cfg.Services)
+	}
+
+	bad := strings.Replace(yml, "check_type: tcp_connect", "check_type: not_a_real_check", 1)
+	if _, _, err := LoadForChecks(writeTemp(t, bad)); err == nil || !strings.Contains(err.Error(), "not_a_real_check") {
+		t.Errorf("LoadForChecks with a bad check_type: err = %v, want it to name the unknown check type", err)
+	}
+}
