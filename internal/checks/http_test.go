@@ -255,3 +255,59 @@ func TestHTTP_RespectsContextDeadline_HungBody(t *testing.T) {
 		t.Errorf("HTTP took %v, expected it to respect the ~50ms context deadline", elapsed)
 	}
 }
+
+// newTLSServer starts a self-signed HTTPS test server and registers its
+// shutdown with t.Cleanup.
+func newTLSServer(t *testing.T, h http.HandlerFunc) (string, int) {
+	t.Helper()
+	ts := httptest.NewTLSServer(h)
+	t.Cleanup(ts.Close)
+	return hostPort(t, ts)
+}
+
+func TestHTTP_HTTPSWithServerName(t *testing.T) {
+	var gotHost string
+	host, port := newTLSServer(t, func(w http.ResponseWriter, r *http.Request) {
+		gotHost = r.Host
+	})
+
+	res := HTTP(context.Background(), host, map[string]any{
+		"port":                 port,
+		"https":                true,
+		"server_name":          "orderwindow.krusty.krab",
+		"insecure_skip_verify": true,
+	})
+	if !res.Success {
+		t.Fatalf("expected success, got %q", res.Detail)
+	}
+	if gotHost != "orderwindow.krusty.krab" {
+		t.Errorf("Host = %q, want %q", gotHost, "orderwindow.krusty.krab")
+	}
+}
+
+func TestHTTP_HTTPSVerifiesCertByDefault(t *testing.T) {
+	host, port := newTLSServer(t, func(http.ResponseWriter, *http.Request) {})
+
+	res := HTTP(context.Background(), host, map[string]any{
+		"port":        port,
+		"https":       true,
+		"server_name": "orderwindow.krusty.krab",
+	})
+	if res.Success {
+		t.Fatal("expected failure against a self-signed certificate")
+	}
+	if !strings.Contains(res.Detail, "certificate") {
+		t.Errorf("Detail = %q, expected it to mention the certificate", res.Detail)
+	}
+}
+
+func TestHTTP_HTTPSParamTypes(t *testing.T) {
+	for _, params := range []map[string]any{
+		{"port": 443, "https": "yes"},
+		{"port": 443, "server_name": 5},
+	} {
+		if err := ValidateParams("http", params); err == nil {
+			t.Errorf("ValidateParams(%v) = nil, want an error", params)
+		}
+	}
+}

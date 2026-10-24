@@ -3,6 +3,7 @@ package checks
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"io"
@@ -21,7 +22,7 @@ const maxHTTPBodyBytes = 64 * 1024
 // maxHTTPHeaderBytes bounds the response header size for the same reason.
 const maxHTTPHeaderBytes = 64 * 1024
 
-// HTTP performs a plain-HTTP GET against host and checks the response.
+// HTTP performs an HTTP or HTTPS GET against host and checks the response.
 //
 // Params:
 //   - port (int, required): TCP port, 1-65535.
@@ -31,6 +32,12 @@ const maxHTTPHeaderBytes = 64 * 1024
 //     100-599.
 //   - expect_contains (string, optional): if non-empty, the first
 //     maxHTTPBodyBytes of the body must contain it.
+//   - https (bool, optional, default false): use HTTPS instead of plain HTTP.
+//   - server_name (string, optional): if non-empty, the request is addressed
+//     to this name (Host header, and TLS SNI and certificate verification)
+//     while the connection still goes to host:port, like curl's --resolve.
+//   - insecure_skip_verify (bool, optional, default false): accept any TLS
+//     certificate, e.g. a self-signed one.
 //
 // Any other param is rejected.
 //
@@ -47,7 +54,18 @@ func HTTP(ctx context.Context, host string, params map[string]any) Result {
 		return fail("%v", err)
 	}
 
-	base := "http://" + net.JoinHostPort(host, strconv.Itoa(p.port))
+	addr := net.JoinHostPort(host, strconv.Itoa(p.port))
+	scheme := "http"
+	if p.https {
+		scheme = "https"
+	}
+	urlHost := addr
+	if p.serverName != "" {
+		// Bare, with no port, so the Host header is just the name a
+		// virtual host matches on; the dial goes to addr regardless.
+		urlHost = p.serverName
+	}
+	base := scheme + "://" + urlHost
 	url := base + p.path
 	shown := base + redactedPath(p.path)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
@@ -55,9 +73,18 @@ func HTTP(ctx context.Context, host string, params map[string]any) Result {
 		return fail("building request for %s: %v", shown, withoutURL(err))
 	}
 
+	dial := (&net.Dialer{}).DialContext
+	if p.serverName != "" {
+		// The URL names serverName, but the connection always goes to the
+		// scored host: serverName is never looked up.
+		dial = func(ctx context.Context, network, _ string) (net.Conn, error) {
+			return (&net.Dialer{}).DialContext(ctx, network, addr)
+		}
+	}
 	transport := &http.Transport{
 		Proxy:                  nil, // never route checks through an environment proxy
-		DialContext:            (&net.Dialer{}).DialContext,
+		DialContext:            dial,
+		TLSClientConfig:        &tls.Config{InsecureSkipVerify: p.insecureSkipVerify},
 		DisableKeepAlives:      true,
 		MaxResponseHeaderBytes: maxHTTPHeaderBytes,
 	}
@@ -120,12 +147,17 @@ type httpParams struct {
 	path           string
 	expectStatus   int
 	expectContains string
+	https          bool
+	serverName     string
+	// insecureSkipVerify disables TLS certificate verification.
+	insecureSkipVerify bool
 }
 
 // parseHTTPParams parses and validates HTTP's params. It is the only place
 // they are checked, for ValidateParams and the check alike.
 func parseHTTPParams(params map[string]any) (httpParams, error) {
-	if err := rejectUnknownParams(params, "port", "path", "expect_status", "expect_contains"); err != nil {
+	if err := rejectUnknownParams(params, "port", "path", "expect_status", "expect_contains",
+		"https", "server_name", "insecure_skip_verify"); err != nil {
 		return httpParams{}, err
 	}
 	port, err := paramPort(params)
@@ -156,10 +188,25 @@ func parseHTTPParams(params map[string]any) (httpParams, error) {
 	if err != nil {
 		return httpParams{}, err
 	}
+	https, _, err := boolParam(params, "https")
+	if err != nil {
+		return httpParams{}, err
+	}
+	serverName, _, err := stringParam(params, "server_name")
+	if err != nil {
+		return httpParams{}, err
+	}
+	insecureSkipVerify, _, err := boolParam(params, "insecure_skip_verify")
+	if err != nil {
+		return httpParams{}, err
+	}
 	return httpParams{
-		port:           port,
-		path:           path,
-		expectStatus:   int(expectStatus),
-		expectContains: expectContains,
+		port:               port,
+		path:               path,
+		expectStatus:       int(expectStatus),
+		expectContains:     expectContains,
+		https:              https,
+		serverName:         serverName,
+		insecureSkipVerify: insecureSkipVerify,
 	}, nil
 }
