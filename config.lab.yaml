@@ -21,8 +21,8 @@
 # tune them to match whatever cadence/weighting you actually want for the
 # competition.
 session_name: "krusty-krab-comp"
-starting_score: 1000
-round_interval_seconds: 30
+starting_score: 1000000
+round_interval_seconds: 60
 
 admin:
   username: admin
@@ -32,14 +32,14 @@ services:
   - name: apache
     host: 10.111.1.4
     check_type: http
-    points_per_failure: 10
+    points_per_failure: 1000
     params:
       port: 80
 
   - name: postgresql
     host: 10.111.1.2
     check_type: postgres
-    points_per_failure: 10
+    points_per_failure: 1000
     params:
       port: 5432
       user: mrkrabs
@@ -49,7 +49,7 @@ services:
   - name: smb
     host: 10.111.1.1
     check_type: smb
-    points_per_failure: 10
+    points_per_failure: 1000
     params:
       port: 445
       user: mrkrabs
@@ -61,7 +61,7 @@ services:
   - name: smtp
     host: 10.111.1.3
     check_type: smtp
-    points_per_failure: 10
+    points_per_failure: 1000
     params:
       port: 587
       user: mrkrabs
@@ -72,7 +72,7 @@ services:
   - name: nginx-docker
     host: 10.111.1.5
     check_type: http_exclusive
-    points_per_failure: 10
+    points_per_failure: 1000
     params:
       port: 80
       expect_contains_ci: wordpress
@@ -81,7 +81,7 @@ services:
   - name: dns
     host: 10.111.2.1
     check_type: dns
-    points_per_failure: 10
+    points_per_failure: 1000
     params:
       port: 53
       name: krusty.krab
@@ -89,7 +89,7 @@ services:
   - name: ad
     host: 10.111.2.1
     check_type: ldap
-    points_per_failure: 10
+    points_per_failure: 1000
     params:
       port: 389
       bind_user: spongebob@krusty.krab
@@ -100,7 +100,7 @@ services:
   - name: iis
     host: 10.111.2.3
     check_type: http
-    points_per_failure: 10
+    points_per_failure: 1000
     params:
       port: 443
       https: true
@@ -113,14 +113,14 @@ services:
   - name: ca
     host: 10.111.2.2
     check_type: script
-    points_per_failure: 10
+    points_per_failure: 1000
     params:
       script: checks/ca_rpc.sh
 
   - name: openfire
     host: 10.111.2.4
     check_type: openfire
-    points_per_failure: 10
+    points_per_failure: 1000
     params:
       port: 9090
       user: sandy
@@ -129,7 +129,7 @@ services:
   - name: telnet
     host: 10.111.2.5
     check_type: script
-    points_per_failure: 10
+    points_per_failure: 1000
     params:
       script: checks/telnet.exp
       env: {CHECK_USER: sandy, CHECK_PASSWORD: "Patty321!", CHECK_EXPECT_HOSTNAME: kelpdelivery}
