@@ -52,6 +52,10 @@ var builtins = map[string]builtin{
 		check:    LDAP,
 		validate: func(p map[string]any) error { _, err := parseLDAPParams(p); return err },
 	},
+	"openfire": {
+		check:    Openfire,
+		validate: func(p map[string]any) error { _, err := parseOpenfireParams(p); return err },
+	},
 	"postgres": {
 		check:    Postgres,
 		validate: func(p map[string]any) error { _, err := parsePostgresParams(p); return err },

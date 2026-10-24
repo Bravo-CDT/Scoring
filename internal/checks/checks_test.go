@@ -59,7 +59,7 @@ func TestRegistry_RegisterReplaces(t *testing.T) {
 
 func TestNewDefaultRegistry_HasBuiltins(t *testing.T) {
 	r := NewDefaultRegistry()
-	for _, name := range []string{"tcp_connect", "http", "http_exclusive", "postgres", "smb", "smtp", "dns", "ldap"} {
+	for _, name := range []string{"tcp_connect", "http", "http_exclusive", "postgres", "smb", "smtp", "dns", "ldap", "openfire"} {
 		if _, ok := r.Get(name); !ok {
 			t.Errorf("expected default registry to include %q", name)
 		}
@@ -68,7 +68,7 @@ func TestNewDefaultRegistry_HasBuiltins(t *testing.T) {
 
 func TestBuiltinTypes(t *testing.T) {
 	got := BuiltinTypes()
-	if want := []string{"dns", "http", "http_exclusive", "ldap", "postgres", "smb", "smtp", "tcp_connect"}; !slices.Equal(got, want) {
+	if want := []string{"dns", "http", "http_exclusive", "ldap", "openfire", "postgres", "smb", "smtp", "tcp_connect"}; !slices.Equal(got, want) {
 		t.Errorf("BuiltinTypes() = %v, want %v", got, want)
 	}
 	// Every built-in type is in the default registry, so config validation and
@@ -177,7 +177,7 @@ func TestValidateParams(t *testing.T) {
 }
 
 func TestBuiltins_RejectEmptyHost(t *testing.T) {
-	for name, fn := range map[string]CheckFunc{"tcp_connect": TCPConnect, "http": HTTP, "http_exclusive": HTTPExclusive, "postgres": Postgres, "smb": SMB, "smtp": SMTP, "dns": DNS, "ldap": LDAP} {
+	for name, fn := range map[string]CheckFunc{"tcp_connect": TCPConnect, "http": HTTP, "http_exclusive": HTTPExclusive, "postgres": Postgres, "smb": SMB, "smtp": SMTP, "dns": DNS, "ldap": LDAP, "openfire": Openfire} {
 		t.Run(name, func(t *testing.T) {
 			res := fn(context.Background(), "", map[string]any{"port": 80, "user": "u", "password": "p", "dbname": "d", "share": "s", "name": "n"})
 			if res.Success {
