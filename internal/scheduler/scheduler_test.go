@@ -584,12 +584,13 @@ func TestRoundStatus_AdvancesOnlyAfterARoundWithSomethingEnabledCompletes(t *tes
 	s := newScheduler(t, registryWith(okCheck), sink, newConfig(t), interval)
 	runFrom(t, s, 5) // as if rounds 1-4 were recorded before a restart
 
-	if round, next := s.RoundStatus(); round != 4 || !next.IsZero() {
-		t.Fatalf("RoundStatus before any round = (%d, %v), want (4, zero time)", round, next)
+	if round, _ := s.RoundStatus(); round != 4 {
+		t.Fatalf("RoundStatus before any round = %d, want 4", round)
 	}
 	time.Sleep(4 * interval) // several idle ticks
-	if round, next := s.RoundStatus(); round != 4 || !next.IsZero() || sink.count() != 0 {
-		t.Fatalf("after idle ticks: RoundStatus = (%d, %v), %d rounds recorded; want (4, zero time) and none",
+	// Idle ticks keep the countdown to the next tick live but record nothing.
+	if round, next := s.RoundStatus(); round != 4 || next.IsZero() || sink.count() != 0 {
+		t.Fatalf("after idle ticks: RoundStatus = (%d, %v), %d rounds recorded; want 4, a next tick, and none",
 			round, next, sink.count())
 	}
 
@@ -616,8 +617,10 @@ func TestRoundStatus_AdvancesOnlyAfterARoundWithSomethingEnabledCompletes(t *tes
 	s.StopService(1)
 	stoppedAt, nextAt := s.RoundStatus()
 	time.Sleep(4 * interval)
-	if round, next := s.RoundStatus(); round != stoppedAt || !next.Equal(nextAt) {
-		t.Errorf("RoundStatus moved from (%d, %v) to (%d, %v) with nothing enabled", stoppedAt, nextAt, round, next)
+	// The round number holds; the next tick keeps moving forward.
+	if round, next := s.RoundStatus(); round != stoppedAt || !next.After(nextAt) {
+		t.Errorf("RoundStatus went from (%d, %v) to (%d, %v) with nothing enabled; want the same round and a later next tick",
+			stoppedAt, nextAt, round, next)
 	}
 }
 

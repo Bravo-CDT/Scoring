@@ -806,6 +806,26 @@ func TestResetRound_BacksUpFirstByDefaultAndThenResets(t *testing.T) {
 	}
 }
 
+// A reset starts the round numbering over: the next round recorded is 1.
+func TestResetRound_RestartsRoundNumbering(t *testing.T) {
+	h := newHarness(t, okCheck, "svc1")
+	h.start(t)
+	waitFor(t, "two rounds", func() bool { return h.status(t).Round >= 2 })
+	mustDo(t, "Stop", h.e.Stop())
+
+	if _, err := h.e.ResetRound(false); err != nil {
+		t.Fatalf("ResetRound: %v", err)
+	}
+	if got := h.status(t).Round; got != 0 {
+		t.Fatalf("Round after reset = %d, want 0", got)
+	}
+	h.start(t)
+	waitFor(t, "a round after the reset", func() bool { return h.status(t).Round >= 1 })
+	if got := h.status(t).Round; got != 1 {
+		t.Errorf("first round after reset = %d, want 1", got)
+	}
+}
+
 func TestResetRound_WithoutBackupSkipsIt(t *testing.T) {
 	h := newHarness(t, okCheck, "svc1")
 	path, err := h.e.ResetRound(false)
@@ -1136,6 +1156,28 @@ func TestReload_NoChangesReturnsEmptySlices(t *testing.T) {
 	}
 }
 
+// Reload applies an edited starting score at once, and restarts a running
+// service whose entry changed so the edit is used from its next round.
+func TestReload_AppliesStartingScoreAndChangedEntries(t *testing.T) {
+	h := newHarness(t, okCheck, "svc1", "svc2")
+	h.start(t)
+	cfg := strings.Replace(configWithServices(svcYAML("svc1", 10)+svcYAML("svc2", 250)),
+		"starting_score: 1000", "starting_score: 1000000", 1)
+	h.writeConfig(t, cfg)
+
+	res, err := h.e.Reload(h.configPath)
+	mustDo(t, "Reload", err)
+	if !slices.Equal(res.Updated, []string{"svc2"}) {
+		t.Errorf("Updated = %v, want [svc2]", res.Updated)
+	}
+	if got, _ := h.e.scheduler.ServiceConfig(h.service(t, "svc2").ID); got.PointsPerFailure != 250 {
+		t.Errorf("svc2 runs with points_per_failure %d, want 250", got.PointsPerFailure)
+	}
+	if s := h.status(t); s.StartingScore != 1000000 || s.BlueScore != 1000000 {
+		t.Errorf("StartingScore = %d, BlueScore = %d; want both 1000000", s.StartingScore, s.BlueScore)
+	}
+}
+
 func TestStatus_ReportsLatestResultAndConsecutiveFailures(t *testing.T) {
 	h := newHarness(t, okCheck, "svc1")
 	svc := h.service(t, "svc1")
@@ -1199,24 +1241,25 @@ func TestStatus_JSONShape(t *testing.T) {
 	}
 }
 
-// Status reports the scheduler's round status: nothing recorded yet before
-// the first round, then exactly what the round clock last recorded.
+// Status reports the scheduler's round status: no round recorded before the
+// first one, then what the round clock last recorded.
 func TestStatus_IncludesRoundAndNextRoundAt(t *testing.T) {
 	h := newHarness(t, okCheck, "svc1")
-	if s := h.status(t); s.Round != 0 || !s.NextRoundAt.IsZero() {
-		t.Errorf("before any round: Round = %d, NextRoundAt = %v; want 0 and the zero time", s.Round, s.NextRoundAt)
+	if s := h.status(t); s.Round != 0 {
+		t.Errorf("before any round: Round = %d, want 0", s.Round)
 	}
 
 	h.start(t)
 	waitFor(t, "a round to be recorded", func() bool { return h.status(t).Round >= 1 })
 	// Stopping the engine waits out any round being recorded and leaves no
-	// service enabled, so the round status holds still from here on.
+	// service enabled, so the round number holds still from here on (idle
+	// ticks still move NextRoundAt forward).
 	mustDo(t, "Stop", h.e.Stop())
 	wantRound, wantNext := h.e.scheduler.RoundStatus()
 
 	s := h.status(t)
-	if s.Round != wantRound || !s.NextRoundAt.Equal(wantNext) {
-		t.Errorf("Round = %d, NextRoundAt = %v; want %d, %v", s.Round, s.NextRoundAt, wantRound, wantNext)
+	if s.Round != wantRound || s.NextRoundAt.Before(wantNext) {
+		t.Errorf("Round = %d, NextRoundAt = %v; want %d, not before %v", s.Round, s.NextRoundAt, wantRound, wantNext)
 	}
 	if wantNext.IsZero() {
 		t.Error("scheduler reports a zero NextRoundAt after a recorded round")

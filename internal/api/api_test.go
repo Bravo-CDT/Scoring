@@ -1150,7 +1150,7 @@ func TestReload(t *testing.T) {
 
 	r := h.do(http.MethodPost, "/reload", token, "")
 	h.mustStatus(r, http.StatusOK, "no-op reload")
-	if got := string(bytes.TrimSpace(r.body)); got != `{"added":[],"removed":[],"failed":[]}` {
+	if got := string(bytes.TrimSpace(r.body)); got != `{"added":[],"removed":[],"updated":[],"failed":[]}` {
 		t.Errorf("no-op reload body = %s, want empty lists", got)
 	}
 

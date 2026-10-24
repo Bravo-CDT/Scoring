@@ -87,8 +87,10 @@ type Scheduler struct {
 	// not even one from a round that ended just before the stop.
 	recordMu sync.Mutex
 
+	// statusMu guards lastRound, nextRound and nextRoundAt.
 	statusMu    sync.Mutex
 	lastRound   int
+	nextRound   int
 	nextRoundAt time.Time
 }
 
@@ -120,16 +122,24 @@ func New(registry *checks.Registry, sink ResultSink, configPath string, roundInt
 func (s *Scheduler) Run(ctx context.Context, firstRound int) <-chan struct{} {
 	s.statusMu.Lock()
 	s.lastRound = firstRound - 1
+	s.nextRound = firstRound
 	s.statusMu.Unlock()
 
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		round := firstRound
 		for {
 			start := time.Now()
+			s.statusMu.Lock()
+			round := s.nextRound
+			s.statusMu.Unlock()
 			if s.runRound(ctx, round, start) {
-				round++
+				s.statusMu.Lock()
+				// A ResetRounds during the round wins over this advance.
+				if s.nextRound == round {
+					s.nextRound = round + 1
+				}
+				s.statusMu.Unlock()
 			}
 			if !sleep(ctx, time.Until(start.Add(s.roundInterval))) {
 				return
@@ -144,9 +154,12 @@ func (s *Scheduler) Run(ctx context.Context, firstRound int) <-chan struct{} {
 // nothing to report, or one abandoned because ctx was cancelled).
 func (s *Scheduler) runRound(ctx context.Context, round int, start time.Time) bool {
 	batch, ctxs := s.beginRound(ctx)
+	// Published even for an idle round, so the countdown to the next tick
+	// stays live while no service is enabled (e.g. just after the engine
+	// starts, before its services' first round).
+	s.publishProjectedRoundStatus(start)
 	var results []checks.RoundResult
 	if len(batch) > 0 {
-		s.publishProjectedRoundStatus(start)
 		results = s.runChecks(ctxs, batch)
 	}
 
@@ -234,9 +247,9 @@ func (s *Scheduler) runChecks(ctxs map[int64]context.Context, batch map[int64]en
 
 // RoundStatus returns the number of the last round recorded and when the next
 // round is due. Before any round of this process is recorded, round is the
-// last one before Run's firstRound and nextRoundAt is the zero time. While no
-// service is enabled both stay at their last values: an idle loop does not
-// advance the round.
+// last one before Run's firstRound; nextRoundAt is the zero time until the
+// loop's first tick. An idle loop (no service enabled) does not advance the
+// round, but nextRoundAt still moves to each next tick.
 func (s *Scheduler) RoundStatus() (round int, nextRoundAt time.Time) {
 	s.statusMu.Lock()
 	defer s.statusMu.Unlock()
@@ -255,6 +268,26 @@ func (s *Scheduler) publishProjectedRoundStatus(start time.Time) {
 	s.statusMu.Lock()
 	s.nextRoundAt = start.Add(s.roundInterval)
 	s.statusMu.Unlock()
+}
+
+// ResetRounds makes the next recorded round number 1 again and reports round
+// 0 as the last one, for a reset of the session's round data. The caller must
+// ensure no service is enabled (the engine is stopped), so no round is
+// recorded under the old numbering afterwards.
+func (s *Scheduler) ResetRounds() {
+	s.statusMu.Lock()
+	defer s.statusMu.Unlock()
+	s.lastRound = 0
+	s.nextRound = 1
+}
+
+// ServiceConfig returns the config entry serviceID's routine is running with,
+// and whether it is enabled at all.
+func (s *Scheduler) ServiceConfig(serviceID int64) (config.ServiceConfig, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	svc, ok := s.enabled[serviceID]
+	return svc.cfg, ok
 }
 
 // setRoundStatus records that round, which began at start, has been recorded.

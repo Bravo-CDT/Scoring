@@ -190,6 +190,8 @@ export interface StartResponse extends Status {
 export interface ReloadResponse {
   added: string[];
   removed: string[];
+  /** Running services restarted because their config entry changed. */
+  updated?: string[];
   failed: StartFailure[];
   /**
    * Why the reload failed as a whole (an invalid file, a store error); absent

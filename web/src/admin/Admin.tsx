@@ -49,6 +49,7 @@ import {
   stopEngine,
   stopService,
 } from '../api/client';
+import { StateBadge } from '../scoreboard/StateBadge';
 import { useStatusPolling } from '../scoreboard/useStatusPolling';
 import { Login } from './Login';
 import { useAdminSession } from './useAdminSession';
@@ -84,6 +85,7 @@ function reloadOutcome(result: ReloadResponse): Outcome {
     ...(result.error ? [result.error] : []),
     ...(result.added.length > 0 ? [`Added: ${result.added.join(', ')}`] : []),
     ...(result.removed.length > 0 ? [`Removed: ${result.removed.join(', ')}`] : []),
+    ...((result.updated ?? []).length > 0 ? [`Restarted with changed config: ${(result.updated ?? []).join(', ')}`] : []),
     ...result.failed.map((failure) => `Failed to start ${describeFailure(failure)}`),
   ];
   if (result.error) {
@@ -574,9 +576,7 @@ function ServiceRow({ service, busy, perform }: { service: ServiceStatus; busy: 
               Scoring…
             </Badge>
           )}
-          <Badge color={service.up ? 'green' : 'red'} variant="filled">
-            {service.up ? 'Up' : 'Down'}
-          </Badge>
+          <StateBadge service={service} />
           <Badge color={service.routine_enabled ? 'green' : 'gray'}>
             {service.routine_enabled ? 'Checking' : 'Stopped'}
           </Badge>

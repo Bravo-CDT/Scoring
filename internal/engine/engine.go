@@ -16,6 +16,8 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"reflect"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -70,6 +72,7 @@ const (
 	EventScoreAdjusted         = "score_adjusted"
 	EventDatabaseBackedUp      = "database_backed_up"
 	EventRoundReset            = "round_reset"
+	EventStartingScoreChanged  = "starting_score_changed"
 )
 
 // StartFailure reports one service whose routine failed to start, for the
@@ -104,8 +107,11 @@ func (e *StartError) Failure() StartFailure {
 // orders Reload documents, and the added services whose routine failed to
 // start. All three are non-nil.
 type ReloadResult struct {
-	Added   []string       `json:"added"`
-	Removed []string       `json:"removed"`
+	Added   []string `json:"added"`
+	Removed []string `json:"removed"`
+	// Updated lists running services whose config entry changed, which were
+	// restarted so the change applies from the next round.
+	Updated []string       `json:"updated"`
 	Failed  []StartFailure `json:"failed"`
 }
 
@@ -446,8 +452,11 @@ func (e *Engine) setServiceScoringPaused(name string, paused bool, eventType, wh
 //     engine is running.
 //   - An active service missing from the file has its routine stopped and is
 //     retired; its history stays queryable.
-//   - A service in both is left alone, routine untouched: edits to its entry
-//     take effect on RestartService.
+//   - A service in both whose routine is running with a different entry is
+//     restarted with the new one; otherwise it is left alone. (A stopped
+//     routine reads its entry afresh whenever it starts.)
+//   - A changed starting_score is applied, moving blue's score by the
+//     difference.
 //
 // Reload never changes the engine state or the global scoring pause. An
 // invalid file changes nothing. An added service whose routine fails to start
@@ -466,7 +475,7 @@ func (e *Engine) ReloadAs(actor Actor, configPath string) (ReloadResult, error) 
 	if configPath == "" {
 		configPath = e.configPath
 	}
-	res := ReloadResult{Added: []string{}, Removed: []string{}, Failed: []StartFailure{}}
+	res := ReloadResult{Added: []string{}, Removed: []string{}, Updated: []string{}, Failed: []StartFailure{}}
 
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -476,6 +485,9 @@ func (e *Engine) ReloadAs(actor Actor, configPath string) (ReloadResult, error) 
 		return res, fmt.Errorf("engine: reloading config: %w", err)
 	}
 	e.recordLoadedConfigHash(configPath)
+	if err := e.applyStartingScore(actor, cfg.StartingScore); err != nil {
+		return res, err
+	}
 	active, err := e.store.ListActiveServices(e.session.ID)
 	if err != nil {
 		return res, fmt.Errorf("engine: reloading config: %w", err)
@@ -500,6 +512,21 @@ func (e *Engine) ReloadAs(actor Actor, configPath string) (ReloadResult, error) 
 		}
 		res.Removed = append(res.Removed, svc.Name)
 	}
+	for _, svc := range active {
+		if !inConfig[svc.Name] {
+			continue
+		}
+		updated, startErr, err := e.restartIfChanged(actor, svc, cfg)
+		if updated {
+			res.Updated = append(res.Updated, svc.Name)
+		}
+		if startErr != nil {
+			res.Failed = append(res.Failed, startErr.Failure())
+		}
+		if err != nil {
+			return res, err
+		}
+	}
 	for _, sc := range cfg.Services {
 		if isActive[sc.Name] {
 			continue
@@ -516,11 +543,11 @@ func (e *Engine) ReloadAs(actor Actor, configPath string) (ReloadResult, error) 
 		}
 	}
 
-	if actor == ActorSystem && len(res.Added) == 0 && len(res.Removed) == 0 {
+	if actor == ActorSystem && len(res.Added) == 0 && len(res.Removed) == 0 && len(res.Updated) == 0 {
 		return res, nil
 	}
-	msg := fmt.Sprintf("config reloaded: added [%s], removed [%s]",
-		strings.Join(res.Added, ", "), strings.Join(res.Removed, ", "))
+	msg := fmt.Sprintf("config reloaded: added [%s], removed [%s], updated [%s]",
+		strings.Join(res.Added, ", "), strings.Join(res.Removed, ", "), strings.Join(res.Updated, ", "))
 	return res, e.logEngineEvent(actor, EventConfigReloaded, msg)
 }
 
@@ -609,10 +636,51 @@ func (e *Engine) ResetRound(backup bool) (string, error) {
 	if err := e.store.ResetRoundData(e.session.ID); err != nil {
 		return path, fmt.Errorf("engine: resetting round data: %w", err)
 	}
+	// The engine is stopped (checked above), so no service is enabled and
+	// no round can be recorded under the old numbering.
+	e.scheduler.ResetRounds()
 	if err := e.logEngineEvent(ActorAdmin, EventRoundReset, "round reset: score and check history cleared"); err != nil {
 		return path, err
 	}
 	return path, nil
+}
+
+// applyStartingScore sets the session's starting score to startingScore if
+// it differs, and logs the change. The caller holds mu.
+func (e *Engine) applyStartingScore(actor Actor, startingScore int) error {
+	current, err := e.store.SessionStartingScore(e.session.ID)
+	if err != nil {
+		return fmt.Errorf("engine: reloading config: %w", err)
+	}
+	if current == startingScore {
+		return nil
+	}
+	if err := e.store.SetSessionStartingScore(e.session.ID, startingScore); err != nil {
+		return fmt.Errorf("engine: reloading config: %w", err)
+	}
+	return e.logEngineEvent(actor, EventStartingScoreChanged,
+		fmt.Sprintf("starting score changed from %d to %d", current, startingScore))
+}
+
+// restartIfChanged restarts svc's routine if it is running with an entry
+// other than cfg's, reporting whether it did. A failed restart leaves the
+// routine stopped, as RestartService does. The caller holds mu.
+func (e *Engine) restartIfChanged(actor Actor, svc store.Service, cfg *config.Config) (bool, *StartError, error) {
+	running, ok := e.scheduler.ServiceConfig(svc.ID)
+	if !ok {
+		return false, nil, nil
+	}
+	i := slices.IndexFunc(cfg.Services, func(sc config.ServiceConfig) bool { return sc.Name == svc.Name })
+	if i < 0 || reflect.DeepEqual(running, cfg.Services[i]) {
+		return false, nil, nil
+	}
+	if err := e.scheduler.RestartService(svc.ID, svc.Name); err != nil {
+		e.logStartFailure(svc, actor, err)
+		return true, &StartError{Service: svc.Name, Err: err}, nil
+	}
+	e.snapshotConfig(svc)
+	return true, nil, e.logServiceEvent(actor, svc, EventRoutineRestarted,
+		svc.Name+" routine restarted with its changed config entry")
 }
 
 // retire stops svc's routine and deactivates it. The caller holds mu.
@@ -696,6 +764,10 @@ func (e *Engine) Status() (Status, error) {
 	if err != nil {
 		return Status{}, fmt.Errorf("engine: status: %w", err)
 	}
+	startingScore, err := e.store.SessionStartingScore(e.session.ID)
+	if err != nil {
+		return Status{}, fmt.Errorf("engine: status: %w", err)
+	}
 	rs, err := e.store.GetRunState()
 	if err != nil {
 		return Status{}, fmt.Errorf("engine: status: %w", err)
@@ -709,7 +781,7 @@ func (e *Engine) Status() (Status, error) {
 
 	out := Status{
 		SessionName:     e.session.Name,
-		StartingScore:   e.session.StartingScore,
+		StartingScore:   startingScore,
 		BlueScore:       blue,
 		RedScore:        red,
 		EngineState:     rs.EngineState,

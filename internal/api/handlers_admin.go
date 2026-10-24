@@ -198,7 +198,7 @@ type reloadResponse struct {
 	Error string `json:"error,omitempty"`
 }
 
-// handleReload serves POST /reload: {"added", "removed", "failed"}. An added
+// handleReload serves POST /reload: {"added", "removed", "updated", "failed"}. An added
 // service whose routine fails to start is still added, so that is a 200 with
 // the failure in "failed". A reload that fails as a whole (an invalid file, a
 // store error) is a 500 whose body carries, beside the error, whatever

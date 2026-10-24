@@ -16,6 +16,7 @@ import {
 import { useEffect, useState } from 'react';
 import type { ServiceStatus, Status } from '../api/client';
 import { ServiceHistory } from './ServiceHistory';
+import { StateBadge } from './StateBadge';
 import { useStatusPolling } from './useStatusPolling';
 
 /** The public scoreboard: scores, services' up/down state, and the countdown. */
@@ -135,9 +136,7 @@ function ServiceRow({ service, onSelect }: { service: ServiceStatus; onSelect: (
                 Scoring…
               </Badge>
             )}
-            <Badge color={service.up ? 'green' : 'red'} variant="filled">
-              {service.up ? 'Up' : 'Down'}
-            </Badge>
+            <StateBadge service={service} />
           </Group>
         </Group>
       </Paper>

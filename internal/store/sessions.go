@@ -21,9 +21,8 @@ type Session struct {
 // startingScore if it does not exist yet.
 //
 // For an existing session the persisted StartingScore is returned unchanged and
-// startingScore is ignored: the ledger records point transfers relative to the
-// score the competition began with, so letting an edited config.yaml change it
-// mid-competition would silently rewrite every team's score.
+// startingScore is ignored here; the engine applies an edited starting_score
+// explicitly, and logs it, through SetSessionStartingScore on reload.
 func (s *Store) GetOrCreateSession(name string, startingScore int) (Session, error) {
 	sess, err := s.findSession(name)
 	if err == nil {
@@ -80,4 +79,19 @@ func (s *Store) findSession(name string) (Session, error) {
 	}
 	sess.CreatedAt = time.UnixMilli(createdAtMillis).UTC()
 	return sess, nil
+}
+
+// SessionStartingScore returns the session's current starting score.
+func (s *Store) SessionStartingScore(sessionID int64) (int, error) {
+	return sessionStartingScore(s.db, sessionID)
+}
+
+// SetSessionStartingScore changes the session's starting score. Blue's
+// balance is the starting score plus the ledger, so it moves by the
+// difference at once; red's is unaffected.
+func (s *Store) SetSessionStartingScore(sessionID int64, startingScore int) error {
+	if _, err := s.db.Exec(`UPDATE sessions SET starting_score = ? WHERE id = ?`, startingScore, sessionID); err != nil {
+		return fmt.Errorf("store: setting starting score of session %d: %w", sessionID, err)
+	}
+	return nil
 }
