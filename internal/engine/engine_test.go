@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 	"sync"
@@ -1220,13 +1221,13 @@ func TestStatus_JSONShape(t *testing.T) {
 	var got map[string]any
 	mustDo(t, "Unmarshal", json.Unmarshal(raw, &got))
 	for _, key := range []string{"session_name", "starting_score", "blue_score", "red_score",
-		"engine_state", "scoring_paused", "server_time", "round", "next_round_at", "services"} {
+		"engine_state", "scoring_paused", "server_time", "round", "next_round_at", "services", "networks", "hosts"} {
 		if _, ok := got[key]; !ok {
 			t.Errorf("status JSON missing %q: %s", key, raw)
 		}
 	}
 	svc := got["services"].([]any)[0].(map[string]any)
-	for _, key := range []string{"name", "up", "routine_enabled", "scoring_paused", "latency_ms", "consecutive_failures"} {
+	for _, key := range []string{"name", "up", "routine_enabled", "scoring_paused", "latency_ms", "consecutive_failures", "host", "check_type"} {
 		if _, ok := svc[key]; !ok {
 			t.Errorf("service JSON missing %q: %s", key, raw)
 		}
@@ -1238,6 +1239,36 @@ func TestStatus_JSONShape(t *testing.T) {
 	// No admin has set a countdown, so there is no target to report.
 	if _, ok := got["countdown_target"]; ok {
 		t.Errorf("countdown_target present before one was set: %s", raw)
+	}
+}
+
+// Status carries what the network diagram needs from the loaded config: each
+// service's host, check type and port, plus the networks and hosts sections.
+func TestStatus_ReportsLayoutFromLoadedConfig(t *testing.T) {
+	h := newHarness(t, okCheck, "svc1")
+	h.writeConfig(t, configYAML("svc1")+`
+networks:
+  - cidr: 127.0.0.0/8
+    name: loopback
+hosts:
+  - address: 127.0.0.1
+    name: box
+    os: linux
+`)
+	if _, err := h.e.Reload(""); err != nil {
+		t.Fatalf("Reload: %v", err)
+	}
+
+	st := h.status(t)
+	svc := st.Services[0]
+	if svc.Host != "127.0.0.1" || svc.CheckType != "tcp_connect" || svc.Port != 9 {
+		t.Errorf("service layout = %q %q %d, want 127.0.0.1 tcp_connect 9", svc.Host, svc.CheckType, svc.Port)
+	}
+	if want := []Network{{CIDR: "127.0.0.0/8", Name: "loopback"}}; !reflect.DeepEqual(st.Networks, want) {
+		t.Errorf("Networks = %+v, want %+v", st.Networks, want)
+	}
+	if want := []Host{{Address: "127.0.0.1", Name: "box", OS: "linux"}}; !reflect.DeepEqual(st.Hosts, want) {
+		t.Errorf("Hosts = %+v, want %+v", st.Hosts, want)
 	}
 }
 

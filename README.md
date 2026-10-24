@@ -97,6 +97,11 @@ Check types: `tcp_connect`, `http`, `http_exclusive`, `postgres`, `smb`,
 `checks/`, for anything else). Unknown keys and bad params are rejected at
 startup and on reload, naming the service and the param.
 
+The scoreboard draws the services as a network diagram, grouped by host and
+by subnet. The optional `hosts:` section gives each host address a name and an
+operating system (which picks its logo), and `networks:` names subnets; see
+the end of `config.example.yaml`. Neither affects checks.
+
 `${VAR}` anywhere in the config is replaced with that environment variable,
 which is how `admin.password_hash` gets `ADMIN_PASSWORD_HASH`.
 

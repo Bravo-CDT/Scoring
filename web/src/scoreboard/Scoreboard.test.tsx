@@ -24,6 +24,8 @@ const status: client.Status = {
       scoring_paused: false,
       latency_ms: 4,
       consecutive_failures: 0,
+      host: '10.0.0.1',
+      check_type: 'tcp_connect',
     },
     {
       name: 'dns',
@@ -33,8 +35,12 @@ const status: client.Status = {
       scoring_paused: false,
       latency_ms: 0,
       consecutive_failures: 2,
+      host: '10.0.0.1',
+      check_type: 'tcp_connect',
     },
   ],
+  networks: [],
+  hosts: [],
 };
 
 afterEach(() => {

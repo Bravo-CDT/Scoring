@@ -175,3 +175,23 @@ services:
     points_per_failure: 10
     params:
       port: 22
+
+# Optional labels for the scoreboard's network diagram. They have no effect on
+# checks and are applied on /reload. The diagram groups services by host, and
+# hosts by network: a host inside one of these CIDRs goes under it (labelled
+# with its name, if it has one), anything else under its own /24.
+networks:
+  - cidr: 10.0.0.0/24
+    name: corp
+
+# Per host address: a name to show above the IP, and its operating system,
+# which picks the logo (windows, linux, ubuntu, debian, centos, rocky or
+# fedora; anything else shows a generic server). Hosts with no entry here
+# still appear, by address only.
+hosts:
+  - address: 10.0.0.10
+    name: web01
+    os: ubuntu
+  - address: 10.0.0.11
+    name: jump
+    os: linux

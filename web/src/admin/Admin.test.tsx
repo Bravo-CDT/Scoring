@@ -26,8 +26,12 @@ const status: Status = {
       scoring_paused: false,
       latency_ms: 4,
       consecutive_failures: 0,
+      host: '10.0.0.1',
+      check_type: 'tcp_connect',
     },
   ],
+  networks: [],
+  hosts: [],
 };
 
 function jsonResponse(httpStatus: number, body: unknown): Response {

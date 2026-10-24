@@ -1,0 +1,107 @@
+/* The scoreboard page: built to be read from across a room on a big screen. */
+
+.page {
+  max-width: 1800px;
+  margin-inline: auto;
+  padding: var(--mantine-spacing-lg) var(--mantine-spacing-xl) calc(var(--mantine-spacing-xl) * 1.5);
+  position: relative;
+}
+
+.header {
+  display: grid;
+  grid-template-columns: 1fr auto 1fr;
+  align-items: center;
+  gap: var(--mantine-spacing-xl);
+  margin-bottom: var(--mantine-spacing-lg);
+  padding-bottom: var(--mantine-spacing-md);
+  border-bottom: 2px solid var(--mantine-color-dark-4);
+}
+
+.title {
+  font-size: clamp(1.5rem, 2vw, 2.25rem);
+}
+
+.scores {
+  display: flex;
+  gap: var(--mantine-spacing-md);
+}
+
+.team {
+  min-width: 14rem;
+  padding: var(--mantine-spacing-sm) var(--mantine-spacing-xl);
+  border-radius: var(--mantine-radius-md);
+  border-top: 4px solid var(--team-colour);
+  background: var(--mantine-color-dark-6);
+  text-align: center;
+}
+
+.team[data-team='blue'] {
+  --team-colour: var(--mantine-color-blue-filled);
+}
+
+.team[data-team='red'] {
+  --team-colour: var(--mantine-color-red-filled);
+}
+
+.score {
+  font-size: clamp(2.25rem, 4vw, 4.25rem);
+  font-weight: 800;
+  line-height: 1.1;
+  font-variant-numeric: tabular-nums;
+}
+
+.clocks {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--mantine-spacing-lg);
+}
+
+.clock {
+  text-align: right;
+}
+
+.clockTime {
+  font-family: var(--mantine-font-family-monospace);
+  font-size: clamp(1.5rem, 2.6vw, 3rem);
+  font-weight: 700;
+  line-height: 1.1;
+}
+
+.admin {
+  position: absolute;
+  right: var(--mantine-spacing-xl);
+  bottom: var(--mantine-spacing-md);
+}
+
+/* A laptop or phone: stack the header instead of spreading it across. */
+@media (max-width: 75em) {
+  .header {
+    grid-template-columns: minmax(0, 1fr);
+    justify-items: center;
+    text-align: center;
+  }
+
+  .clocks {
+    justify-content: center;
+  }
+
+  .clock {
+    text-align: center;
+  }
+}
+
+@media (max-width: 36em) {
+  .page {
+    padding-inline: var(--mantine-spacing-md);
+  }
+
+  .scores {
+    width: 100%;
+  }
+
+  .team {
+    flex: 1;
+    min-width: 0;
+    padding-inline: var(--mantine-spacing-sm);
+  }
+}

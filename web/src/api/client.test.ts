@@ -44,8 +44,12 @@ describe('getStatus', () => {
           scoring_paused: false,
           latency_ms: 4,
           consecutive_failures: 0,
+          host: '10.0.0.1',
+          check_type: 'tcp_connect',
         },
       ],
+      networks: [],
+      hosts: [],
     };
     const fetchMock = stubFetch({ ok: true, status: 200, json: async () => body });
 

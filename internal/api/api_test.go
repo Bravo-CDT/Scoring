@@ -281,7 +281,7 @@ func TestStatus_DocumentedFields(t *testing.T) {
 
 	out := r.object(t)
 	// countdown_target is omitted until an admin sets one.
-	wantTop := []string{"blue_score", "engine_state", "next_round_at", "red_score", "round",
+	wantTop := []string{"blue_score", "engine_state", "hosts", "networks", "next_round_at", "red_score", "round",
 		"scoring_paused", "server_time", "services", "session_name", "starting_score"}
 	if got := keys(out); !slices.Equal(got, wantTop) {
 		t.Errorf("status keys = %v, want %v", got, wantTop)
@@ -307,8 +307,9 @@ func TestStatus_DocumentedFields(t *testing.T) {
 		t.Fatalf("services = %v, want one entry", out["services"])
 	}
 	svc, _ := services[0].(map[string]any)
-	// last_check_time is omitted before any check has run.
-	wantSvc := []string{"checking", "consecutive_failures", "latency_ms", "name", "routine_enabled", "scoring_paused", "up"}
+	// last_check_time is omitted before any check has run, and port for a
+	// check type without one.
+	wantSvc := []string{"check_type", "checking", "consecutive_failures", "host", "latency_ms", "name", "routine_enabled", "scoring_paused", "up"}
 	if got := keys(svc); !slices.Equal(got, wantSvc) {
 		t.Errorf("service keys = %v, want %v", got, wantSvc)
 	}

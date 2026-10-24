@@ -19,6 +19,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"net/netip"
 	"os"
 	"regexp"
 	"slices"
@@ -57,6 +58,22 @@ type AdminConfig struct {
 	PasswordHash string `yaml:"password_hash"`
 }
 
+// NetworkConfig names a subnet on the scoreboard's network diagram. It has
+// no effect on checks.
+type NetworkConfig struct {
+	CIDR string `yaml:"cidr"`
+	Name string `yaml:"name"`
+}
+
+// HostConfig describes a checked machine for the scoreboard's network
+// diagram: what it's called and what it runs. It has no effect on checks;
+// services are matched to it by their host.
+type HostConfig struct {
+	Address string `yaml:"address"`
+	Name    string `yaml:"name"`
+	OS      string `yaml:"os"`
+}
+
 // Config is a whole config.yaml.
 type Config struct {
 	SessionName   string `yaml:"session_name"`
@@ -68,6 +85,10 @@ type Config struct {
 	RoundIntervalSeconds int             `yaml:"round_interval_seconds"`
 	Admin                AdminConfig     `yaml:"admin"`
 	Services             []ServiceConfig `yaml:"services"`
+	// Networks and Hosts only label the scoreboard's network diagram; both
+	// are optional and are applied on /reload.
+	Networks []NetworkConfig `yaml:"networks"`
+	Hosts    []HostConfig    `yaml:"hosts"`
 }
 
 // Hash returns the sha256 hex digest of raw config file bytes, used to
@@ -197,7 +218,37 @@ func validate(cfg *Config, withAdmin bool) error {
 			return fmt.Errorf("admin.password_hash is not a valid bcrypt hash: %w", err)
 		}
 	}
-	return validateServices(cfg.Services)
+	if err := validateServices(cfg.Services); err != nil {
+		return err
+	}
+	return validateLayout(cfg.Networks, cfg.Hosts)
+}
+
+// validateLayout checks the diagram labels: every network a valid CIDR and
+// every host an address, with neither listed twice.
+func validateLayout(networks []NetworkConfig, hosts []HostConfig) error {
+	seenNets := make(map[netip.Prefix]struct{}, len(networks))
+	for i, n := range networks {
+		prefix, err := netip.ParsePrefix(n.CIDR)
+		if err != nil {
+			return fmt.Errorf("networks[%d].cidr: %w", i, err)
+		}
+		if _, dup := seenNets[prefix.Masked()]; dup {
+			return fmt.Errorf("duplicate network %q", n.CIDR)
+		}
+		seenNets[prefix.Masked()] = struct{}{}
+	}
+	seenHosts := make(map[string]struct{}, len(hosts))
+	for i, h := range hosts {
+		if h.Address == "" {
+			return fmt.Errorf("hosts[%d].address is required", i)
+		}
+		if _, dup := seenHosts[h.Address]; dup {
+			return fmt.Errorf("duplicate host %q", h.Address)
+		}
+		seenHosts[h.Address] = struct{}{}
+	}
+	return nil
 }
 
 // validateServices checks every service entry: unique names, a host, a known

@@ -21,6 +21,24 @@ export interface ServiceStatus {
   last_check_time?: string;
   latency_ms: number;
   consecutive_failures: number;
+  /** The address the service is checked at, from its config entry. */
+  host: string;
+  check_type: string;
+  /** The port checked; absent for a check type without one. */
+  port?: number;
+}
+
+/** A configured subnet label for the network diagram (engine.Network). */
+export interface Network {
+  cidr: string;
+  name?: string;
+}
+
+/** A configured host's name and operating system (engine.Host). */
+export interface Host {
+  address: string;
+  name?: string;
+  os?: string;
 }
 
 /** The response of GET /status (engine.Status). */
@@ -39,6 +57,8 @@ export interface Status {
   /** The admin-set time the countdown runs to; absent while unset. */
   countdown_target?: string;
   services: ServiceStatus[];
+  networks: Network[];
+  hosts: Host[];
 }
 
 /** A non-2xx response from the API. */

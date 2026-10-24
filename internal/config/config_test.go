@@ -460,6 +460,16 @@ services:
 			yaml:    strings.Replace(minimalYAML, "points_per_failure: 10", "points_per_failure: -5", 1),
 			wantErr: "points_per_failure",
 		},
+		{
+			name:    "network cidr that isn't one",
+			yaml:    minimalYAML + "networks:\n  - cidr: 10.111.1.0\n",
+			wantErr: "networks[0].cidr",
+		},
+		{
+			name:    "host listed twice",
+			yaml:    minimalYAML + "hosts:\n  - address: 10.0.0.1\n  - address: 10.0.0.1\n",
+			wantErr: "duplicate host",
+		},
 	}
 
 	for _, tt := range tests {
