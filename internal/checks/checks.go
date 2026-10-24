@@ -60,6 +60,10 @@ var builtins = map[string]builtin{
 		check:    Postgres,
 		validate: func(p map[string]any) error { _, err := parsePostgresParams(p); return err },
 	},
+	"script": {
+		check:    Script,
+		validate: func(p map[string]any) error { _, err := parseScriptParams(p); return err },
+	},
 	"smb": {
 		check:    SMB,
 		validate: func(p map[string]any) error { _, err := parseSMBParams(p); return err },
