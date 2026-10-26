@@ -190,8 +190,13 @@ function InjectCard({
   const approved = inject.approved_at !== undefined;
   const pdfId = `inject-${inject.id}-pdf`;
 
-  useEffect(() => setDeadline(toLocalInput(inject.deadline)), [inject.deadline]);
-  useEffect(() => setGrade(inject.grade ?? ''), [inject.grade]);
+  // Follow saved changes (this browser's or another admin's, via the poll).
+  const [shown, setShown] = useState({ deadline: inject.deadline, grade: inject.grade });
+  if (shown.deadline !== inject.deadline || shown.grade !== inject.grade) {
+    setShown({ deadline: inject.deadline, grade: inject.grade });
+    setDeadline(toLocalInput(inject.deadline));
+    setGrade(inject.grade ?? '');
+  }
 
   async function act(what: string, action: () => Promise<void>) {
     setBusy(true);
