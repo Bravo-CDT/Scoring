@@ -134,6 +134,18 @@ CREATE TABLE IF NOT EXISTS engine_run_state (
 	countdown_target INTEGER
 );
 
+-- Blue team changes to a service's check credentials, by service name; a
+-- service with no row uses its config's. Passwords are plain text: the engine
+-- runs on a closed network and the checks need them in the clear anyway.
+CREATE TABLE IF NOT EXISTS credential_overrides (
+	session_id INTEGER NOT NULL REFERENCES sessions(id),
+	service    TEXT NOT NULL,
+	username   TEXT NOT NULL,
+	password   TEXT NOT NULL,
+	changed_at INTEGER NOT NULL,
+	PRIMARY KEY (session_id, service)
+);
+
 -- Singleton counter backing AdjustScore's ledger source_ref, so every manual
 -- adjustment gets a distinct, monotonically increasing reference.
 CREATE TABLE IF NOT EXISTS manual_adjustment_seq (

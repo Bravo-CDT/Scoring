@@ -2,8 +2,9 @@ package store
 
 import "fmt"
 
-// ResetRoundData deletes every check_results and ledger_entries row for
-// sessionID -- this competition's score and check-result history -- leaving
+// ResetRoundData deletes every check_results, ledger_entries and
+// credential_overrides row for sessionID -- this competition's score and
+// check-result history, and the blue team's credential changes -- leaving
 // events, sessions, services, and service_config_snapshots completely
 // untouched. GetScore and the check-result queries derive entirely from
 // these two tables, so both read fresh afterward with no further change
@@ -20,6 +21,9 @@ func (s *Store) ResetRoundData(sessionID int64) error {
 	}
 	if _, err := tx.Exec(`DELETE FROM check_results WHERE session_id = ?`, sessionID); err != nil {
 		return fmt.Errorf("store: resetting check results for session %d: %w", sessionID, err)
+	}
+	if _, err := tx.Exec(`DELETE FROM credential_overrides WHERE session_id = ?`, sessionID); err != nil {
+		return fmt.Errorf("store: resetting credential overrides for session %d: %w", sessionID, err)
 	}
 
 	if err := tx.Commit(); err != nil {
