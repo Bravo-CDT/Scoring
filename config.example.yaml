@@ -43,6 +43,20 @@ admin:
   # Single-quote the hash when exporting it: it contains '$' characters.
   password_hash: ${ADMIN_PASSWORD_HASH}
 
+# Optional: the blue team's login to the Credentials page (linked from the
+# scoreboard). Signed in, they can switch a credentialed check (postgres, smb,
+# smtp, ldap, openfire, or a script whose env sets both CHECK_USER and
+# CHECK_PASSWORD) to one of allowed_users and set its password. Their change
+# is kept in the database and used from the next round; the values in this
+# file stay the defaults an admin can reset to. Leave the section out to turn
+# the feature off. The login is read at startup only; allowed_users applies on
+# /reload. The hash works like admin.password_hash above.
+#
+# blue_team:
+#   username: blue
+#   password_hash: <the BLUE_PASSWORD_HASH reference, as for admin>
+#   allowed_users: [alice, bob]
+
 # Each service is checked once per round (see round_interval_seconds above);
 # there is no per-service interval. Each failure costs points_per_failure.
 # Service names are the keys for scoring history: renaming one creates a new
