@@ -88,6 +88,11 @@ const (
 	EventStartingScoreChanged  = "starting_score_changed"
 	EventCredentialChanged     = "credential_changed"
 	EventCredentialReset       = "credential_reset"
+	EventInjectCreated         = "inject_created"
+	EventInjectUpdated         = "inject_updated"
+	EventInjectSubmitted       = "inject_submitted"
+	EventInjectApproved        = "inject_approved"
+	EventInjectDeleted         = "inject_deleted"
 )
 
 // StartFailure reports one service whose routine failed to start, for the
@@ -141,6 +146,8 @@ const (
 	ActorSystem Actor = "system"
 	// ActorBlueTeam is the blue team, changing a check's credentials.
 	ActorBlueTeam Actor = "blue_team"
+	// ActorRedTeam is the red team, submitting an inject.
+	ActorRedTeam Actor = "red_team"
 )
 
 // Engine is the control plane for one session. It is safe for concurrent use.
@@ -187,6 +194,16 @@ type Engine struct {
 	// blueLogin is whether the app has a blue team login, which, like the
 	// admin's, is read at startup only.
 	blueLogin atomic.Bool
+	// redLogin is the same for the red team's login.
+	redLogin atomic.Bool
+
+	// injectMu serializes the inject operations that check an inject's
+	// state and then change it, such as Submit's deadline check and its
+	// write. It is separate from mu so a submission never waits behind a
+	// control operation; ResetRound takes it after mu.
+	injectMu sync.Mutex
+	// uploadsDir is where submissions and inject PDFs are kept.
+	uploadsDir string
 }
 
 // layout is what Status reports about the network, beyond up/down.
@@ -198,6 +215,10 @@ type layout struct {
 	// allowedUsers its allowed_users.
 	blueTeam     bool
 	allowedUsers []string
+	// redTeam is whether the config has a red_team section.
+	redTeam bool
+	// injectWorth is what an inject graded 10/10 is worth.
+	injectWorth int
 }
 
 type serviceLayout struct {
@@ -216,6 +237,9 @@ func newLayout(cfg *config.Config) *layout {
 		networks: make([]Network, 0, len(cfg.Networks)),
 		hosts:    make([]Host, 0, len(cfg.Hosts)),
 		services: make(map[string]serviceLayout, len(cfg.Services)),
+
+		redTeam:     cfg.RedTeam != nil,
+		injectWorth: cfg.InjectWorth(),
 	}
 	for _, n := range cfg.Networks {
 		l.networks = append(l.networks, Network{CIDR: n.CIDR, Name: n.Name})
@@ -713,13 +737,19 @@ func (e *Engine) ResetRound(backup bool) (string, error) {
 		return "", ErrEngineRunning
 	}
 
-	if _, err := e.store.ResetRoundData(e.session.ID); err != nil {
+	e.injectMu.Lock()
+	deleted, err := e.store.ResetRoundData(e.session.ID)
+	e.injectMu.Unlock()
+	if err != nil {
 		return path, fmt.Errorf("engine: resetting round data: %w", err)
+	}
+	for _, name := range deleted {
+		e.removeUpload(name)
 	}
 	// The engine is stopped (checked above), so no service is enabled and
 	// no round can be recorded under the old numbering.
 	e.scheduler.ResetRounds()
-	if err := e.logEngineEvent(ActorAdmin, EventRoundReset, "round reset: score and check history cleared, credentials reset to defaults"); err != nil {
+	if err := e.logEngineEvent(ActorAdmin, EventRoundReset, "round reset: score and check history cleared, credentials reset to defaults, inject submissions cleared"); err != nil {
 		return path, err
 	}
 	return path, nil
@@ -858,6 +888,8 @@ type Status struct {
 	// CredentialsEnabled is whether the blue team credentials page is on
 	// (the config has a blue_team section).
 	CredentialsEnabled bool `json:"credentials_enabled"`
+	// InjectsEnabled is whether either team can log in to its injects page.
+	InjectsEnabled bool `json:"injects_enabled"`
 }
 
 // Status reports the session's current state. It does not wait for control
@@ -900,6 +932,7 @@ func (e *Engine) Status() (Status, error) {
 		Hosts:           l.hosts,
 
 		CredentialsEnabled: e.blueLogin.Load() && l.blueTeam,
+		InjectsEnabled:     e.TeamEnabled(TeamBlue) || e.TeamEnabled(TeamRed),
 	}
 	for _, svc := range svcs {
 		ss := ServiceStatus{
