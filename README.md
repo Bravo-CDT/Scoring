@@ -48,7 +48,9 @@ cp config.lab.yaml config.yaml   # real hosts/services, with the comp's known
                                   # default service password baked in
 make hash PASSWORD=adminpassword
 make hash PASSWORD=bluepassword  # the blue team's login, see below
-ADMIN_PASSWORD_HASH='<admin hash>' BLUE_PASSWORD_HASH='<blue hash>' make run
+make hash PASSWORD=redpassword   # the red team's login, see Injects
+ADMIN_PASSWORD_HASH='<admin hash>' BLUE_PASSWORD_HASH='<blue hash>' \
+  RED_PASSWORD_HASH='<red hash>' make run
 ```
 
 ### During the competition
@@ -101,6 +103,39 @@ section, every check uses the config's
 credentials: blue team changes are kept in the database but not applied, and
 apply again if the section comes back.
 
+### Injects
+
+Injects are the written tasks handed out during the competition. When the
+config has a `blue_team` or `red_team` section, the scoreboard links to
+`http://<host>:8080/injects`, where each team logs in with its own login
+(`red_team.username` and the password behind `RED_PASSWORD_HASH` for red)
+and sees only its own injects.
+
+In the admin console's Injects section, an admin creates an inject for blue
+or red with a deadline and uploads its instructions as a PDF. A new inject
+starts closed; **Open** lets the team submit, until the deadline or until
+it's closed again. The team downloads the PDF and uploads one file (any
+type, up to 50 MB) with a note saying what it's for; uploading again
+replaces the earlier submission.
+
+The grey team grades a submission out of 10 in the same section and can
+change the grade until it's approved. **Approve** needs the inject closed
+or past its deadline, and is final: it moves grade/10 × `inject_points`
+(30000 unless the config says otherwise). A blue inject adds the points to
+blue; a red inject moves them from blue to red. Grading doesn't need
+scoring paused. **Delete** removes an inject and its files and takes back
+any points it moved.
+
+Clicking a team's score on the scoreboard shows where its points came from:
+services, injects, manual adjustments, and the scavenger hunt (always 0 for
+now). Points per inject show only on the team's own injects page.
+
+Submissions and PDFs are kept in an `uploads/` directory next to the
+database. Backups don't include it, so copy it along with a backup if you
+need the files. "Reset for a new round" keeps the injects but closes them and
+deletes every submission and grade. Like the blue team's, the red team login
+is read at startup only.
+
 Everything the console does is also a plain HTTP API: `POST /login` with
 `{"username","password"}` returns a token, sent as
 `Authorization: Bearer <token>` on the admin routes (`POST /engine/start`,
@@ -130,7 +165,8 @@ the end of `config.example.yaml`. Neither affects checks.
 
 `${VAR}` anywhere in the config is replaced with that environment variable,
 which is how `admin.password_hash` gets `ADMIN_PASSWORD_HASH` (and
-`blue_team.password_hash` gets `BLUE_PASSWORD_HASH`).
+`blue_team.password_hash` gets `BLUE_PASSWORD_HASH`, `red_team.password_hash`
+`RED_PASSWORD_HASH`).
 
 ## Checking services by hand
 
@@ -177,8 +213,9 @@ database file (e.g. `backups/scoring-20261022T190000.123Z.db` next to
 `scoring.db`), safe to copy elsewhere at any time.
 
 "Reset for a new round" clears scores and history for the current session,
-puts blue team credential changes back to the config's defaults, and restarts
-round numbering at 1.
+puts blue team credential changes back to the config's defaults, clears
+inject submissions and grades (keeping the injects), and restarts round
+numbering at 1.
 
 There is no restore button; restoring one is a manual, three-step process:
 

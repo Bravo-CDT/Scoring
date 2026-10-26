@@ -57,6 +57,22 @@ admin:
 #   password_hash: <the BLUE_PASSWORD_HASH reference, as for admin>
 #   allowed_users: [alice, bob]
 
+# Optional: the red team's login to the Injects page. The blue team uses its
+# blue_team login there. Each team sees only its own injects. Leave the
+# section out and red injects can still be created, but the red team can't
+# log in to submit them. Read at startup only; the hash works like
+# admin.password_hash above.
+#
+# red_team:
+#   username: red
+#   password_hash: <the RED_PASSWORD_HASH reference, as for admin>
+
+# Optional: what an inject graded 10/10 is worth; one graded 7/10 is worth
+# 7/10 of it. Defaults to 30000. Applied on /reload to injects not yet
+# approved.
+#
+# inject_points: 30000
+
 # Each service is checked once per round (see round_interval_seconds above);
 # there is no per-service interval. Each failure costs points_per_failure.
 # Service names are the keys for scoring history: renaming one creates a new

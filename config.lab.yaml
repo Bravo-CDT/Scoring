@@ -7,9 +7,10 @@
 # at which point these checks will start failing until this file (or the
 # live service's entry via POST /reload) is updated to match.
 #
-# Before `make run`, still set ADMIN_PASSWORD_HASH and BLUE_PASSWORD_HASH in
-# the environment (see `make hash`) -- the scoring engine's own admin and blue
-# team logins, not service credentials, deliberately kept out of this file.
+# Before `make run`, still set ADMIN_PASSWORD_HASH, BLUE_PASSWORD_HASH and
+# RED_PASSWORD_HASH in the environment (see `make hash`) -- the scoring
+# engine's own admin, blue team and red team logins, not service credentials,
+# deliberately kept out of this file.
 #
 # The ca and telnet services are script checks: their scripts live in
 # checks/ (paths are relative to the repo root, so run the engine from
@@ -34,6 +35,12 @@ blue_team:
   username: blue
   password_hash: ${BLUE_PASSWORD_HASH}
   allowed_users: [mrkrabs, spongebob, squidward, patrick, sandy, gary, puff, larry, mermaidman, barnacleboy, jellyfish]
+
+red_team:
+  username: red
+  password_hash: ${RED_PASSWORD_HASH}
+
+inject_points: 30000
 
 services:
   - name: apache
