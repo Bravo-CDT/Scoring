@@ -1,11 +1,22 @@
 import { useCallback, useEffect, useState } from 'react';
-import { ApiError, type AuthedFetch, blueLogin, fetchWithToken, login as apiLogin, responseError } from '../api/client';
+import {
+  ApiError,
+  type AuthedFetch,
+  blueLogin,
+  fetchWithToken,
+  login as apiLogin,
+  responseError,
+  teamLogin,
+} from '../api/client';
 
 /** The localStorage key the admin's bearer token is kept under. */
 export const TOKEN_STORAGE_KEY = 'admin_token';
 
 /** The localStorage key the blue team's bearer token is kept under. */
 export const BLUE_TOKEN_STORAGE_KEY = 'blue_token';
+
+/** The localStorage key a team's bearer token for the injects page is kept under. */
+export const TEAM_TOKEN_STORAGE_KEY = 'team_token';
 
 // Storage access throws where the browser blocks it (some private modes, or
 // site data disabled); the admin then simply stays logged out.
@@ -58,6 +69,11 @@ export function useAdminSession(): Session {
 /** The blue team's login session, for the credentials page; see useSession. */
 export function useBlueSession(): Session {
   return useSession(BLUE_TOKEN_STORAGE_KEY, blueLogin);
+}
+
+/** The blue or red team's login session, for the injects page; see useSession. */
+export function useTeamSession(): Session {
+  return useSession(TEAM_TOKEN_STORAGE_KEY, teamLogin);
 }
 
 /**

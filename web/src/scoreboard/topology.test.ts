@@ -32,6 +32,7 @@ const base: Status = {
   networks: [],
   hosts: [],
   credentials_enabled: false,
+  injects_enabled: false,
 };
 
 describe('buildTopology', () => {

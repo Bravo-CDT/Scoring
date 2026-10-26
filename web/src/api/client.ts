@@ -61,6 +61,8 @@ export interface Status {
   hosts: Host[];
   /** Whether the blue team credentials page is on. */
   credentials_enabled: boolean;
+  /** Whether either team can log in to the injects page. */
+  injects_enabled: boolean;
 }
 
 /** A non-2xx response from the API. */
@@ -187,6 +189,11 @@ export function login(username: string, password: string): Promise<string> {
 /** POST /blue/login: login, for the blue team's credentials page. */
 export function blueLogin(username: string, password: string): Promise<string> {
   return loginAt('/blue/login', username, password);
+}
+
+/** POST /team/login: the blue or red team's login to the injects page; resolves to its token. */
+export function teamLogin(username: string, password: string): Promise<string> {
+  return loginAt('/team/login', username, password);
 }
 
 async function loginAt(path: string, username: string, password: string): Promise<string> {
@@ -492,4 +499,141 @@ export async function setCredential(
 /** POST /blue/credentials/{service}/reset: back to the config's credentials. */
 export function resetCredential(send: AuthedFetch, service: string): Promise<CredentialEntry> {
   return postJSON(send, `${credentialPath(service)}/reset`);
+}
+
+// Injects. A team's token sees only its own team's; the admin's sees all.
+
+/** A team's latest submission for an inject (engine.SubmissionView). */
+export interface SubmissionView {
+  note: string;
+  file_name: string;
+  size: number;
+  submitted_at: string;
+}
+
+/** An inject as GET /team/injects lists it (engine.InjectView). */
+export interface InjectView {
+  id: number;
+  team: 'blue' | 'red';
+  title: string;
+  has_pdf: boolean;
+  open: boolean;
+  deadline: string;
+  /** Whether the team can submit now: open, before the deadline, not approved. */
+  accepting: boolean;
+  /** What a 10/10 is worth. */
+  worth: number;
+  grade?: number;
+  /** The points approval moved; set once approved. */
+  points?: number;
+  approved_at?: string;
+  submission?: SubmissionView;
+}
+
+/** One team's score by where it came from (engine.TeamBreakdown). */
+export interface TeamBreakdown {
+  starting: number;
+  services: number;
+  injects: number;
+  manual: number;
+  scavenger_hunt: number;
+  total: number;
+}
+
+/** The response of GET /score/breakdown. */
+export interface ScoreBreakdown {
+  blue: TeamBreakdown;
+  red: TeamBreakdown;
+}
+
+function injectPath(id: number, action?: string): string {
+  return `/admin/injects/${id}${action ? `/${action}` : ''}`;
+}
+
+async function sendJSON<T>(send: AuthedFetch, method: string, path: string, body?: unknown): Promise<T> {
+  const init: RequestInit = { method, headers: { Accept: 'application/json' } };
+  if (body !== undefined) {
+    init.headers = { Accept: 'application/json', 'Content-Type': 'application/json' };
+    init.body = JSON.stringify(body);
+  }
+  const res = await send(path, init);
+  if (!res.ok) {
+    throw await responseError(method, path, res);
+  }
+  return (await res.json()) as T;
+}
+
+/** PUTs a multipart form; the browser sets its Content-Type with the boundary. */
+async function putForm<T>(send: AuthedFetch, path: string, form: FormData): Promise<T> {
+  const res = await send(path, { method: 'PUT', headers: { Accept: 'application/json' }, body: form });
+  if (!res.ok) {
+    throw await responseError('PUT', path, res);
+  }
+  return (await res.json()) as T;
+}
+
+/** GET /team/injects. */
+export function getInjects(send: AuthedFetch): Promise<InjectView[]> {
+  return getJSONAuthed(send, '/team/injects');
+}
+
+/** PUT /team/injects/{id}/submission: the note, then the file (the API reads them in that order). */
+export function submitInject(send: AuthedFetch, id: number, note: string, file: File): Promise<InjectView> {
+  const form = new FormData();
+  form.append('note', note);
+  form.append('file', file);
+  return putForm(send, `/team/injects/${id}/submission`, form);
+}
+
+/** Downloads a file that needs the bearer token, such as an inject's PDF. */
+export async function downloadFile(send: AuthedFetch, path: string): Promise<Blob> {
+  const res = await send(path);
+  if (!res.ok) {
+    throw await responseError('GET', path, res);
+  }
+  return res.blob();
+}
+
+/** POST /admin/injects: a new, closed inject. */
+export function createInject(
+  send: AuthedFetch,
+  inject: { title: string; team: 'blue' | 'red'; deadline: string },
+): Promise<InjectView> {
+  return sendJSON(send, 'POST', '/admin/injects', inject);
+}
+
+/** PUT /admin/injects/{id}. */
+export function updateInject(
+  send: AuthedFetch,
+  id: number,
+  change: { title: string; deadline: string; open: boolean },
+): Promise<InjectView> {
+  return sendJSON(send, 'PUT', injectPath(id), change);
+}
+
+/** PUT /admin/injects/{id}/pdf. */
+export function uploadInjectPdf(send: AuthedFetch, id: number, file: File): Promise<InjectView> {
+  const form = new FormData();
+  form.append('file', file);
+  return putForm(send, injectPath(id, 'pdf'), form);
+}
+
+/** PUT /admin/injects/{id}/grade: a whole number from 0 to 10. */
+export function gradeInject(send: AuthedFetch, id: number, grade: number): Promise<InjectView> {
+  return sendJSON(send, 'PUT', injectPath(id, 'grade'), { grade });
+}
+
+/** POST /admin/injects/{id}/approve: moves the inject's points; final. */
+export function approveInject(send: AuthedFetch, id: number): Promise<InjectView> {
+  return sendJSON(send, 'POST', injectPath(id, 'approve'));
+}
+
+/** DELETE /admin/injects/{id}: the inject, its files, and any points it moved. */
+export async function deleteInject(send: AuthedFetch, id: number): Promise<void> {
+  await sendJSON(send, 'DELETE', injectPath(id));
+}
+
+/** GET /score/breakdown, public. */
+export function getScoreBreakdown(): Promise<ScoreBreakdown> {
+  return getJSON<ScoreBreakdown>('/score/breakdown');
 }

@@ -64,6 +64,11 @@ export function Scoreboard() {
             Credentials
           </Anchor>
         )}
+        {status.injects_enabled && (
+          <Anchor href="/injects" c="dimmed" fz="xs">
+            Injects
+          </Anchor>
+        )}
         <Anchor href="/admin" c="dimmed" fz="xs">
           Admin
         </Anchor>

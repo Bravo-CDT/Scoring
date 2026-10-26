@@ -42,6 +42,7 @@ const status: client.Status = {
   networks: [],
   hosts: [],
   credentials_enabled: false,
+  injects_enabled: false,
 };
 
 afterEach(() => {
