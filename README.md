@@ -46,8 +46,9 @@ machine that can reach it):
 ```sh
 cp config.lab.yaml config.yaml   # real hosts/services, with the comp's known
                                   # default service password baked in
-make hash PASSWORD=yourpassword
-ADMIN_PASSWORD_HASH='<hash>' make run
+make hash PASSWORD=adminpassword
+make hash PASSWORD=bluepassword  # the blue team's login, see below
+ADMIN_PASSWORD_HASH='<admin hash>' BLUE_PASSWORD_HASH='<blue hash>' make run
 ```
 
 ### During the competition
@@ -74,6 +75,27 @@ paused, including after a crash or restart:
 
 A service with no check results yet shows as "Unregistered" rather than up or
 down.
+
+### Blue team credentials
+
+When the config has a `blue_team` section (the lab config does), the
+scoreboard links to `http://<host>:8080/credentials`. The blue team logs in
+there with `blue_team.username` and the password behind `BLUE_PASSWORD_HASH`,
+and sees every check that logs in to something (postgres, smb, smtp, ldap,
+openfire, and scripts with `CHECK_USER`/`CHECK_PASSWORD`), with the user it
+logs in as. When they rotate a password on a box, they pick the user from
+`blue_team.allowed_users` and enter the new password; checks use it from the
+next round. Passwords are never shown back.
+
+Their changes are kept in the database, not the config, so they survive
+restarts and `config.yaml` keeps the defaults. The admin console's
+Credentials section shows what's been changed and resets a service to the
+config's user and password, e.g. after its box is rebuilt. "Reset for a new
+round" resets them all. For ldap, the user keeps the config's `@domain`:
+picking `patrick` binds as `patrick@krusty.krab`.
+
+The blue team login is read at startup only, so adding or removing the
+`blue_team` section takes a restart; `allowed_users` applies on reload.
 
 Everything the console does is also a plain HTTP API: `POST /login` with
 `{"username","password"}` returns a token, sent as
@@ -103,7 +125,8 @@ operating system (which picks its logo), and `networks:` names subnets; see
 the end of `config.example.yaml`. Neither affects checks.
 
 `${VAR}` anywhere in the config is replaced with that environment variable,
-which is how `admin.password_hash` gets `ADMIN_PASSWORD_HASH`.
+which is how `admin.password_hash` gets `ADMIN_PASSWORD_HASH` (and
+`blue_team.password_hash` gets `BLUE_PASSWORD_HASH`).
 
 ## Checking services by hand
 
@@ -124,7 +147,8 @@ make check CONFIG=config.lab.yaml SERVICES="iis telnet" # just these
 ```
 
 This needs no `ADMIN_PASSWORD_HASH`, touches no database, and is safe to
-run alongside a running engine. Run it (and the engine) from the repo root:
+run alongside a running engine. Because it reads no database, it checks with
+the config's credentials, not ones the blue team has changed. Run it (and the engine) from the repo root:
 script paths in the config are relative to the working directory, and
 every script must live in `checks/` -- the engine refuses to run one from
 anywhere else. The built binary does the same thing:
@@ -148,8 +172,9 @@ backup is a complete snapshot written to a `backups/` directory next to the
 database file (e.g. `backups/scoring-20261022T190000.123Z.db` next to
 `scoring.db`), safe to copy elsewhere at any time.
 
-"Reset for a new round" clears scores and history for the current session and
-restarts round numbering at 1.
+"Reset for a new round" clears scores and history for the current session,
+puts blue team credential changes back to the config's defaults, and restarts
+round numbering at 1.
 
 There is no restore button; restoring one is a manual, three-step process:
 
