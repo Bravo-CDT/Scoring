@@ -5,6 +5,7 @@ import (
 	"slices"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/Bravo-CDT/Scoring/internal/checks"
 	"github.com/Bravo-CDT/Scoring/internal/store"
@@ -55,13 +56,23 @@ func (e *Engine) Credentials() (Credentials, error) {
 	return out, nil
 }
 
+// EnableBlueTeamLogin records that the app has a blue team login. Until it
+// is called the credentials feature is off whatever the config says.
+func (e *Engine) EnableBlueTeamLogin() { e.blueLogin.Store(true) }
+
+// CredentialsEnabled is whether the credentials feature is on: the app has a
+// blue team login and the config last loaded has a blue_team section.
+func (e *Engine) CredentialsEnabled() bool {
+	return e.blueLogin.Load() && e.currentLayout().blueTeam
+}
+
 // CredentialOverrides returns the blue team's credential changes to check
 // with, by service name: the scheduler's credential source. None while the
-// config last loaded has no blue_team section, so turning the feature off
+// feature is off (see CredentialsEnabled), so turning it off
 // puts every check back on the config's credentials (the stored changes are
 // kept, and apply again if it is turned back on).
 func (e *Engine) CredentialOverrides() (map[string]checks.Credential, error) {
-	if !e.currentLayout().blueTeam {
+	if !e.CredentialsEnabled() {
 		return nil, nil
 	}
 	overrides, err := e.store.CredentialOverrides(e.session.ID)
@@ -78,7 +89,8 @@ func (e *Engine) CredentialOverrides() (map[string]checks.Credential, error) {
 // SetCredential switches service's check to username, one of the allowed
 // users, with password, from the next round on, as the blue team.
 func (e *Engine) SetCredential(service, username, password string) (CredentialEntry, error) {
-	if _, err := e.lookup(service); err != nil {
+	svc, err := e.lookup(service)
+	if err != nil {
 		return CredentialEntry{}, err
 	}
 	l := e.currentLayout()
@@ -88,14 +100,15 @@ func (e *Engine) SetCredential(service, username, password string) (CredentialEn
 	if !slices.Contains(l.allowedUsers, username) {
 		return CredentialEntry{}, ErrUserNotAllowed
 	}
-	if password == "" || len(password) > maxCredentialPassword {
+	if password == "" || len(password) > maxCredentialPassword ||
+		strings.ContainsFunc(password, unicode.IsControl) {
 		return CredentialEntry{}, ErrInvalidPassword
 	}
 	o := store.CredentialOverride{Service: service, Username: username, Password: password, ChangedAt: time.Now()}
 	if err := e.store.SetCredentialOverride(e.session.ID, o); err != nil {
 		return CredentialEntry{}, fmt.Errorf("engine: setting credential: %w", err)
 	}
-	if err := e.logCredentialEvent(ActorBlueTeam, service, EventCredentialChanged,
+	if err := e.logServiceEvent(ActorBlueTeam, svc, EventCredentialChanged,
 		fmt.Sprintf("%s: credentials changed, username %s", service, username)); err != nil {
 		return CredentialEntry{}, err
 	}
@@ -106,31 +119,26 @@ func (e *Engine) SetCredential(service, username, password string) (CredentialEn
 // ResetCredential drops the blue team's change to service's credentials, so
 // its check uses the config's again from the next round on, as an admin.
 func (e *Engine) ResetCredential(service string) (CredentialEntry, error) {
-	if _, err := e.lookup(service); err != nil {
+	svc, err := e.lookup(service)
+	if err != nil {
 		return CredentialEntry{}, err
 	}
 	l := e.currentLayout()
 	if !l.services[service].credentialed {
 		return CredentialEntry{}, ErrNotCredentialed
 	}
-	if _, err := e.store.DeleteCredentialOverride(e.session.ID, service); err != nil {
+	had, err := e.store.DeleteCredentialOverride(e.session.ID, service)
+	if err != nil {
 		return CredentialEntry{}, fmt.Errorf("engine: resetting credential: %w", err)
 	}
-	if err := e.logCredentialEvent(ActorAdmin, service, EventCredentialReset,
-		fmt.Sprintf("%s: credentials reset to default", service)); err != nil {
-		return CredentialEntry{}, err
+	if had {
+		if err := e.logServiceEvent(ActorAdmin, svc, EventCredentialReset,
+			fmt.Sprintf("%s: credentials reset to default", service)); err != nil {
+			return CredentialEntry{}, err
+		}
 	}
 	entry, _ := l.credentialEntry(service, nil)
 	return entry, nil
-}
-
-// logCredentialEvent logs a credential change against service.
-func (e *Engine) logCredentialEvent(actor Actor, service, eventType, message string) error {
-	svc, err := e.lookup(service)
-	if err != nil {
-		return err
-	}
-	return e.logServiceEvent(actor, svc, eventType, message)
 }
 
 // currentLayout is the layout from the config last loaded, or an empty one

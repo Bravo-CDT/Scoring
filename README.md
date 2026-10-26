@@ -94,9 +94,10 @@ config's user and password, e.g. after its box is rebuilt. "Reset for a new
 round" resets them all. For ldap, the user keeps the config's `@domain`:
 picking `patrick` binds as `patrick@krusty.krab`.
 
-The blue team login is read at startup only, so adding or removing the
-`blue_team` section takes a restart to change the login; `allowed_users`
-applies on reload. Without the section, every check uses the config's
+The blue team login is read at startup only, so adding the `blue_team`
+section takes a restart before the page comes on; removing it and reloading
+turns the page off at once. `allowed_users` applies on reload. Without the
+section, every check uses the config's
 credentials: blue team changes are kept in the database but not applied, and
 apply again if the section comes back.
 

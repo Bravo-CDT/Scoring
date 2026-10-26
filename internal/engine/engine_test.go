@@ -1413,7 +1413,27 @@ func newCredentialsHarness(t *testing.T) *harness {
 	if _, err := h.e.Reload(""); err != nil {
 		t.Fatalf("Reload: %v", err)
 	}
+	h.e.EnableBlueTeamLogin()
 	return h
+}
+
+// A blue_team section added by a reload, with no blue team login since
+// startup, leaves the feature off: no page, and no overrides applied.
+func TestCredentials_OffWithoutBlueTeamLogin(t *testing.T) {
+	h := newHarness(t, okCheck, "web", "db")
+	h.writeConfig(t, credentialsConfig())
+	_, err := h.e.Reload("")
+	mustDo(t, "Reload", err)
+	mustDo(t, "SetOverride", h.st.SetCredentialOverride(h.e.session.ID,
+		store.CredentialOverride{Service: "db", Username: "patrick", Password: "pw2", ChangedAt: time.Now()}))
+	if h.status(t).CredentialsEnabled {
+		t.Error("CredentialsEnabled = true without a blue team login")
+	}
+	got, err := h.e.CredentialOverrides()
+	mustDo(t, "CredentialOverrides", err)
+	if len(got) != 0 {
+		t.Errorf("overrides without a blue team login = %+v, want none", got)
+	}
 }
 
 func TestCredentials_ListsCredentialedServicesWithDefaults(t *testing.T) {
@@ -1464,6 +1484,8 @@ func TestSetCredential_Rejects(t *testing.T) {
 		{"nope", "patrick", "pw", ErrServiceNotFound},
 		{"db", "patrick", "", ErrInvalidPassword},
 		{"db", "patrick", strings.Repeat("x", 257), ErrInvalidPassword},
+		{"db", "patrick", "pw\x00", ErrInvalidPassword},
+		{"db", "patrick", "pw\n", ErrInvalidPassword},
 	}
 	for _, tt := range tests {
 		if _, err := h.e.SetCredential(tt.service, tt.user, tt.password); !errors.Is(err, tt.want) {
@@ -1480,6 +1502,18 @@ func TestResetCredential_BackToDefault(t *testing.T) {
 	mustDo(t, "ResetCredential", err)
 	if entry.Username != "mrkrabs" || entry.ChangedAt != nil {
 		t.Errorf("entry after reset = %+v, want the default mrkrabs, unchanged", entry)
+	}
+}
+
+// Resetting a service already on its defaults changes nothing, so logs nothing.
+func TestResetCredential_UnchangedLogsNothing(t *testing.T) {
+	h := newCredentialsHarness(t)
+	_, err := h.e.ResetCredential("db")
+	mustDo(t, "ResetCredential", err)
+	for _, ev := range h.events(t) {
+		if ev.Type == EventCredentialReset {
+			t.Errorf("logged %q for a service with no change to reset", ev.Message)
+		}
 	}
 }
 

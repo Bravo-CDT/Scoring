@@ -1435,6 +1435,7 @@ blue_team:
 	if _, err := h.e.Reload(""); err != nil {
 		t.Fatalf("Reload: %v", err)
 	}
+	h.e.EnableBlueTeamLogin()
 	return h
 }
 
@@ -1489,4 +1490,15 @@ func TestBlueCredentials_OffWithoutBlueTeam(t *testing.T) {
 	h := newHarness(t, okCheck, "svc1")
 	r := h.do(http.MethodPost, "/blue/login", "", fmt.Sprintf(`{"username":%q,"password":%q}`, blueUsername, testPassword))
 	h.mustStatus(r, http.StatusNotFound, "blue login with the feature off")
+}
+
+// Removing blue_team and reloading turns the routes off, login and all.
+func TestBlueCredentials_OffAfterBlueTeamRemoved(t *testing.T) {
+	h := newCredentialsHarness(t)
+	h.writeConfig(configYAML("db"))
+	if _, err := h.e.Reload(""); err != nil {
+		t.Fatalf("Reload: %v", err)
+	}
+	r := h.do(http.MethodPost, "/blue/login", "", fmt.Sprintf(`{"username":%q,"password":%q}`, blueUsername, testPassword))
+	h.mustStatus(r, http.StatusNotFound, "blue login after blue_team was removed")
 }

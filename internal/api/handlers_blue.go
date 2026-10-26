@@ -24,10 +24,11 @@ func (s *server) routeBlueTeam() {
 	s.mux.HandleFunc("POST /blue/credentials/{service}/reset", s.blueOnly(s.requireToken(false, true, s.handleResetCredential)))
 }
 
-// blueOnly answers 404 while the blue team login is off.
+// blueOnly answers 404 while the blue team login is off, or the config last
+// loaded has no blue_team section.
 func (s *server) blueOnly(h http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if s.blueAuth == nil {
+		if s.blueAuth == nil || !s.engine.CredentialsEnabled() {
 			writeError(w, http.StatusNotFound, blueTeamOff)
 			return
 		}

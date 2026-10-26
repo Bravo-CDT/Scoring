@@ -59,7 +59,7 @@ var ErrInvalidAdjustment = errors.New("engine: invalid score adjustment")
 var (
 	ErrNotCredentialed = errors.New("this service's check does not log in with a username and password")
 	ErrUserNotAllowed  = errors.New("that user is not one of the allowed users")
-	ErrInvalidPassword = errors.New("the password must be 1 to 256 bytes")
+	ErrInvalidPassword = errors.New("the password must be 1 to 256 bytes, with no control characters")
 )
 
 // maxCredentialPassword bounds a blue team password, in bytes.
@@ -184,6 +184,9 @@ type Engine struct {
 	// the config last loaded (at startup and on every successful Reload).
 	// Nil until then.
 	layout atomic.Pointer[layout]
+	// blueLogin is whether the app has a blue team login, which, like the
+	// admin's, is read at startup only.
+	blueLogin atomic.Bool
 }
 
 // layout is what Status reports about the network, beyond up/down.
@@ -896,7 +899,7 @@ func (e *Engine) Status() (Status, error) {
 		Networks:        l.networks,
 		Hosts:           l.hosts,
 
-		CredentialsEnabled: l.blueTeam,
+		CredentialsEnabled: e.blueLogin.Load() && l.blueTeam,
 	}
 	for _, svc := range svcs {
 		ss := ServiceStatus{

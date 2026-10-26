@@ -15,6 +15,8 @@ const refreshMs = 10_000;
 export function CredentialsSection({ send }: { send: AuthedFetch }) {
   const [credentials, setCredentials] = useState<Credentials | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // Kept apart from error, which each successful poll clears.
+  const [resetError, setResetError] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
 
   useEffect(() => {
@@ -40,13 +42,14 @@ export function CredentialsSection({ send }: { send: AuthedFetch }) {
 
   async function reset(service: string) {
     setBusy(service);
+    setResetError(null);
     try {
       const entry = await resetCredential(send, service);
       setCredentials((c) =>
         c && { ...c, credentials: c.credentials.map((e) => (e.service === entry.service ? entry : e)) },
       );
     } catch (err) {
-      setError(`Reset ${service} failed: ${describeError(err)}`);
+      setResetError(`Reset ${service} failed: ${describeError(err)}`);
     } finally {
       setBusy(null);
     }
@@ -64,6 +67,7 @@ export function CredentialsSection({ send }: { send: AuthedFetch }) {
           {changed} of {entries.length} changed by the blue team.
         </Text>
         {error && <Alert color="red">{error}</Alert>}
+        {resetError && <Alert color="red">{resetError}</Alert>}
         <Table>
           <Table.Thead>
             <Table.Tr>

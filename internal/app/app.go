@@ -161,6 +161,7 @@ func build(opts Options, cfg *config.Config, st *store.Store) (*App, error) {
 	// Like the admin's, the blue team login is read at startup only.
 	if cfg.BlueTeam != nil {
 		apiOpts = append(apiOpts, api.WithBlueTeam(auth.New(cfg.BlueTeam.Username, cfg.BlueTeam.PasswordHash)))
+		eng.EnableBlueTeamLogin()
 	}
 	// Started last, so no error path above leaves it running.
 	ctx, cancel := context.WithCancel(context.Background())
