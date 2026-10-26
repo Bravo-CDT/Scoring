@@ -1221,7 +1221,7 @@ func TestStatus_JSONShape(t *testing.T) {
 	var got map[string]any
 	mustDo(t, "Unmarshal", json.Unmarshal(raw, &got))
 	for _, key := range []string{"session_name", "starting_score", "blue_score", "red_score",
-		"engine_state", "scoring_paused", "server_time", "round", "next_round_at", "services", "networks", "hosts"} {
+		"engine_state", "scoring_paused", "server_time", "round", "next_round_at", "services", "networks", "hosts", "credentials_enabled"} {
 		if _, ok := got[key]; !ok {
 			t.Errorf("status JSON missing %q: %s", key, raw)
 		}
@@ -1379,5 +1379,115 @@ func TestConcurrentControlOperations(t *testing.T) {
 	mustDo(t, "final Stop", h.e.Stop())
 	if ids := h.e.scheduler.RunningServiceIDs(); len(ids) != 0 {
 		t.Errorf("routines %v left running after the engine stopped", ids)
+	}
+}
+
+// credentialsConfig is a config with one credentialed service (db, postgres)
+// and one without credentials (web), plus a blue_team section.
+func credentialsConfig() string {
+	return configWithServices(svcYAML("web", 10)+`
+  - name: db
+    host: 10.0.0.2
+    check_type: postgres
+    points_per_failure: 10
+    params: {port: 5432, user: mrkrabs, password: pw1, dbname: d}
+`) + fmt.Sprintf(`
+hosts:
+  - {address: 10.0.0.2, name: pattyvault}
+blue_team:
+  username: blue
+  password_hash: %q
+  allowed_users: [mrkrabs, patrick]
+`, adminHash)
+}
+
+// newCredentialsHarness is a harness loaded with credentialsConfig.
+func newCredentialsHarness(t *testing.T) *harness {
+	t.Helper()
+	h := newHarness(t, okCheck, "web", "db")
+	h.writeConfig(t, credentialsConfig())
+	if _, err := h.e.Reload(""); err != nil {
+		t.Fatalf("Reload: %v", err)
+	}
+	return h
+}
+
+func TestCredentials_ListsCredentialedServicesWithDefaults(t *testing.T) {
+	h := newCredentialsHarness(t)
+	got, err := h.e.Credentials()
+	mustDo(t, "Credentials", err)
+	want := Credentials{
+		AllowedUsers: []string{"mrkrabs", "patrick"},
+		Entries:      []CredentialEntry{{Service: "db", Host: "10.0.0.2", HostName: "pattyvault", Username: "mrkrabs"}},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("Credentials = %+v, want %+v", got, want)
+	}
+	if !h.status(t).CredentialsEnabled {
+		t.Errorf("CredentialsEnabled = false with a blue_team section")
+	}
+}
+
+func TestSetCredential_StoresAndLogsWithoutPassword(t *testing.T) {
+	h := newCredentialsHarness(t)
+	entry, err := h.e.SetCredential("db", "patrick", "s3cret-pw")
+	mustDo(t, "SetCredential", err)
+	if entry.Username != "patrick" || entry.ChangedAt == nil {
+		t.Errorf("entry = %+v, want patrick with a ChangedAt", entry)
+	}
+	overrides, err := h.st.CredentialOverrides(h.sess.ID)
+	mustDo(t, "CredentialOverrides", err)
+	if o := overrides["db"]; o.Username != "patrick" || o.Password != "s3cret-pw" {
+		t.Errorf("stored override = %+v", o)
+	}
+	last := h.lastEvent(t, EventCredentialChanged)
+	if last.Actor != string(ActorBlueTeam) {
+		t.Errorf("credential_changed actor = %q, want blue_team", last.Actor)
+	}
+	if strings.Contains(last.Message+last.Detail, "s3cret-pw") {
+		t.Errorf("event %q leaks the password", last.Message)
+	}
+}
+
+func TestSetCredential_Rejects(t *testing.T) {
+	h := newCredentialsHarness(t)
+	tests := []struct {
+		service, user, password string
+		want                    error
+	}{
+		{"db", "jellyfish", "pw", ErrUserNotAllowed},
+		{"web", "patrick", "pw", ErrNotCredentialed},
+		{"nope", "patrick", "pw", ErrServiceNotFound},
+		{"db", "patrick", "", ErrInvalidPassword},
+		{"db", "patrick", strings.Repeat("x", 257), ErrInvalidPassword},
+	}
+	for _, tt := range tests {
+		if _, err := h.e.SetCredential(tt.service, tt.user, tt.password); !errors.Is(err, tt.want) {
+			t.Errorf("SetCredential(%q, %q, len %d) = %v, want %v", tt.service, tt.user, len(tt.password), err, tt.want)
+		}
+	}
+}
+
+func TestResetCredential_BackToDefault(t *testing.T) {
+	h := newCredentialsHarness(t)
+	_, err := h.e.SetCredential("db", "patrick", "pw2")
+	mustDo(t, "SetCredential", err)
+	entry, err := h.e.ResetCredential("db")
+	mustDo(t, "ResetCredential", err)
+	if entry.Username != "mrkrabs" || entry.ChangedAt != nil {
+		t.Errorf("entry after reset = %+v, want the default mrkrabs, unchanged", entry)
+	}
+}
+
+func TestResetRound_ClearsCredentials(t *testing.T) {
+	h := newCredentialsHarness(t)
+	_, err := h.e.SetCredential("db", "patrick", "pw2")
+	mustDo(t, "SetCredential", err)
+	_, err = h.e.ResetRound(false)
+	mustDo(t, "ResetRound", err)
+	got, err := h.e.Credentials()
+	mustDo(t, "Credentials", err)
+	if got.Entries[0].ChangedAt != nil {
+		t.Errorf("entry after round reset = %+v, want back on defaults", got.Entries[0])
 	}
 }

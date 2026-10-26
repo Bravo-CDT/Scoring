@@ -281,7 +281,7 @@ func TestStatus_DocumentedFields(t *testing.T) {
 
 	out := r.object(t)
 	// countdown_target is omitted until an admin sets one.
-	wantTop := []string{"blue_score", "engine_state", "hosts", "networks", "next_round_at", "red_score", "round",
+	wantTop := []string{"blue_score", "credentials_enabled", "engine_state", "hosts", "networks", "next_round_at", "red_score", "round",
 		"scoring_paused", "server_time", "services", "session_name", "starting_score"}
 	if got := keys(out); !slices.Equal(got, wantTop) {
 		t.Errorf("status keys = %v, want %v", got, wantTop)
