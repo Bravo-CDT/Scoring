@@ -116,20 +116,10 @@ func build(opts Options, cfg *config.Config, st *store.Store) (*App, error) {
 	}
 	sc := scorer.New(st, sess.ID)
 	sched := scheduler.New(registry, sc, opts.ConfigPath, time.Duration(cfg.RoundIntervalSeconds)*time.Second)
+	eng := engine.New(st, sess, sched, opts.ConfigPath)
 	// Each round checks with the blue team's credential changes, read fresh
 	// from the database, so a change or reset applies from the next round.
-	sched.SetCredentialSource(func() (map[string]checks.Credential, error) {
-		overrides, err := st.CredentialOverrides(sess.ID)
-		if err != nil {
-			return nil, err
-		}
-		creds := make(map[string]checks.Credential, len(overrides))
-		for name, o := range overrides {
-			creds[name] = checks.Credential{Username: o.Username, Password: o.Password}
-		}
-		return creds, nil
-	})
-	eng := engine.New(st, sess, sched, opts.ConfigPath)
+	sched.SetCredentialSource(eng.CredentialOverrides)
 
 	// Sync the session's services with the config through the same path as
 	// /reload: services new to the file are created (or reactivated with their

@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Bravo-CDT/Scoring/internal/checks"
 	"github.com/Bravo-CDT/Scoring/internal/store"
 )
 
@@ -52,6 +53,26 @@ func (e *Engine) Credentials() (Credentials, error) {
 	}
 	slices.SortFunc(out.Entries, func(a, b CredentialEntry) int { return strings.Compare(a.Service, b.Service) })
 	return out, nil
+}
+
+// CredentialOverrides returns the blue team's credential changes to check
+// with, by service name: the scheduler's credential source. None while the
+// config last loaded has no blue_team section, so turning the feature off
+// puts every check back on the config's credentials (the stored changes are
+// kept, and apply again if it is turned back on).
+func (e *Engine) CredentialOverrides() (map[string]checks.Credential, error) {
+	if !e.currentLayout().blueTeam {
+		return nil, nil
+	}
+	overrides, err := e.store.CredentialOverrides(e.session.ID)
+	if err != nil {
+		return nil, err
+	}
+	creds := make(map[string]checks.Credential, len(overrides))
+	for name, o := range overrides {
+		creds[name] = checks.Credential{Username: o.Username, Password: o.Password}
+	}
+	return creds, nil
 }
 
 // SetCredential switches service's check to username, one of the allowed

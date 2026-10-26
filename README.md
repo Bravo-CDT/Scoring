@@ -95,7 +95,10 @@ round" resets them all. For ldap, the user keeps the config's `@domain`:
 picking `patrick` binds as `patrick@krusty.krab`.
 
 The blue team login is read at startup only, so adding or removing the
-`blue_team` section takes a restart; `allowed_users` applies on reload.
+`blue_team` section takes a restart to change the login; `allowed_users`
+applies on reload. Without the section, every check uses the config's
+credentials: blue team changes are kept in the database but not applied, and
+apply again if the section comes back.
 
 Everything the console does is also a plain HTTP API: `POST /login` with
 `{"username","password"}` returns a token, sent as

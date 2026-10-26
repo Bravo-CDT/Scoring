@@ -1491,3 +1491,26 @@ func TestResetRound_ClearsCredentials(t *testing.T) {
 		t.Errorf("entry after round reset = %+v, want back on defaults", got.Entries[0])
 	}
 }
+
+// Overrides apply only while the config has a blue_team section: removing it
+// turns the feature off, so checks go back to the config's credentials.
+func TestCredentialOverrides_OnlyWhileBlueTeamConfigured(t *testing.T) {
+	h := newCredentialsHarness(t)
+	_, err := h.e.SetCredential("db", "patrick", "pw2")
+	mustDo(t, "SetCredential", err)
+	got, err := h.e.CredentialOverrides()
+	mustDo(t, "CredentialOverrides", err)
+	if c := got["db"]; c.Username != "patrick" || c.Password != "pw2" {
+		t.Fatalf("overrides with blue_team = %+v, want db as patrick", got)
+	}
+
+	cfg := credentialsConfig()
+	h.writeConfig(t, cfg[:strings.Index(cfg, "blue_team:")])
+	_, err = h.e.Reload("")
+	mustDo(t, "Reload", err)
+	got, err = h.e.CredentialOverrides()
+	mustDo(t, "CredentialOverrides", err)
+	if len(got) != 0 {
+		t.Errorf("overrides without blue_team = %+v, want none", got)
+	}
+}
