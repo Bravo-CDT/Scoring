@@ -231,13 +231,14 @@ func (e *Engine) SetInjectPDF(id int64, name string, r io.Reader) error {
 }
 
 // InjectPDF returns the path and original name of the inject's PDF, for team
-// or, when team is "", the admin.
+// or, when team is "", the admin. A team gets it only once the inject has
+// been opened.
 func (e *Engine) InjectPDF(team string, id int64) (path, name string, err error) {
 	in, err := e.getInject(team, id)
 	if err != nil {
 		return "", "", err
 	}
-	if in.PDFName == "" {
+	if !pdfVisible(in, team != "") {
 		return "", "", ErrInjectNotFound
 	}
 	return e.upload(pdfName(id)), in.PDFName, nil
@@ -438,10 +439,10 @@ func (e *Engine) getInject(team string, id int64) (store.Inject, error) {
 
 // view is in as the admin sees it, or as its team does when forTeam is set:
 // without the grade until it's approved, since the grade is a draft until
-// then.
+// then, and without the instructions until it's first opened.
 func (e *Engine) view(in store.Inject, forTeam bool) (InjectView, error) {
 	v := InjectView{
-		ID: in.ID, Team: in.Team, Title: in.Title, HasPDF: in.PDFName != "",
+		ID: in.ID, Team: in.Team, Title: in.Title, HasPDF: pdfVisible(in, forTeam),
 		Open: in.Open, Deadline: in.Deadline, Accepting: accepting(in, time.Now()),
 		Worth: e.currentLayout().injectWorth, Grade: in.Grade, Points: in.Points, ApprovedAt: in.ApprovedAt,
 	}
@@ -456,6 +457,12 @@ func (e *Engine) view(in store.Inject, forTeam bool) (InjectView, error) {
 		v.Submission = &SubmissionView{Note: sub.Note, FileName: sub.FileName, Size: sub.Size, SubmittedAt: sub.SubmittedAt}
 	}
 	return v, nil
+}
+
+// pdfVisible is whether the inject has instructions its viewer may download:
+// the admin always, the team once the inject has been opened.
+func pdfVisible(in store.Inject, forTeam bool) bool {
+	return in.PDFName != "" && (in.Released || !forTeam)
 }
 
 // logInjectEvent logs an inject event. Events are public, so the message

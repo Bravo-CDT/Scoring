@@ -114,7 +114,9 @@ and sees only its own injects.
 In the admin console's Injects section, an admin creates an inject for blue
 or red with a deadline and uploads its instructions as a PDF. A new inject
 starts closed; **Open** lets the team submit, until the deadline or until
-it's closed again. The team downloads the PDF and uploads one file (any
+it's closed again. Teams can see upcoming injects, but not the PDF until
+the inject is first opened; from then on it stays available. The team
+downloads the PDF and uploads one file (any
 type, up to 50 MB) with a note saying what it's for; uploading again
 replaces the earlier submission.
 

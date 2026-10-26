@@ -323,3 +323,43 @@ func TestResetRound_BackupKeepsSubmissionFiles(t *testing.T) {
 		t.Errorf("backup uploads = %v, %v; want the one submission", kept, err)
 	}
 }
+
+// A team sees an upcoming inject but not its instructions until it's first
+// opened; after that they stay available, closed or not.
+func TestInjectPDF_HiddenUntilFirstOpened(t *testing.T) {
+	h := newInjectsHarness(t, "")
+	in, err := h.e.CreateInject(InjectInput{Title: "t", Team: TeamBlue, Deadline: time.Now().Add(time.Hour)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := h.e.SetInjectPDF(in.ID, "t.pdf", strings.NewReader("%PDF-1.4")); err != nil {
+		t.Fatal(err)
+	}
+	visible := func() bool {
+		t.Helper()
+		v, err := h.e.Inject(TeamBlue, in.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, _, pdfErr := h.e.InjectPDF(TeamBlue, in.ID)
+		if v.HasPDF != (pdfErr == nil) {
+			t.Fatalf("has_pdf %v but InjectPDF err %v", v.HasPDF, pdfErr)
+		}
+		return v.HasPDF
+	}
+
+	if visible() {
+		t.Error("instructions visible before the inject opened")
+	}
+	if admin, _ := h.e.Inject("", in.ID); !admin.HasPDF {
+		t.Error("admin can't see the instructions")
+	}
+	for _, open := range []bool{true, false} {
+		if _, err := h.e.UpdateInject(in.ID, "t", in.Deadline, open); err != nil {
+			t.Fatal(err)
+		}
+		if !visible() {
+			t.Errorf("instructions hidden after opening (open=%v)", open)
+		}
+	}
+}

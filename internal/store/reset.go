@@ -6,7 +6,7 @@ import "fmt"
 // credential_overrides and inject_submissions row for sessionID -- this
 // competition's score and check-result history, the blue team's credential
 // changes, and the teams' inject submissions -- and puts every inject back to
-// closed and ungraded. Events, sessions, services, service_config_snapshots
+// closed, unreleased and ungraded. Events, sessions, services, service_config_snapshots
 // and the injects themselves are kept. GetScore and the check-result queries
 // derive entirely from the first two tables, so both read fresh afterward
 // with no further change needed.
@@ -39,7 +39,7 @@ func (s *Store) ResetRoundData(sessionID int64) (deletedFiles []string, err erro
 	if _, err := tx.Exec(`DELETE FROM inject_submissions WHERE session_id = ?`, sessionID); err != nil {
 		return nil, fmt.Errorf("store: resetting submissions for session %d: %w", sessionID, err)
 	}
-	if _, err := tx.Exec(`UPDATE injects SET open = 0, grade = NULL, points = NULL, approved_at = NULL WHERE session_id = ?`, sessionID); err != nil {
+	if _, err := tx.Exec(`UPDATE injects SET open = 0, released = 0, grade = NULL, points = NULL, approved_at = NULL WHERE session_id = ?`, sessionID); err != nil {
 		return nil, fmt.Errorf("store: resetting injects for session %d: %w", sessionID, err)
 	}
 

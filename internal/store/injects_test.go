@@ -2,6 +2,7 @@ package store
 
 import (
 	"errors"
+	"path/filepath"
 	"testing"
 	"time"
 )
@@ -122,5 +123,26 @@ func TestScoreBreakdown_SumsBySource(t *testing.T) {
 	b, r, _ := st.GetScore(sess.ID)
 	if sum := blue.Starting + blue.Services + blue.Injects + blue.Manual; sum != b || red.Services+red.Injects+red.Manual != r {
 		t.Errorf("breakdown sums (%d) don't match GetScore (%d, %d)", sum, b, r)
+	}
+}
+
+// A database made before injects had a released column gets one on Open,
+// set for every inject that was already open or approved.
+func TestOpen_AddsReleasedToOlderInjects(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "scoring.db")
+	st := openAt(t, path)
+	sess := newSession(t, st, "comp-1")
+	in := newInject(t, st, sess.ID, SideBlue)
+	in.Open = true
+	if err := st.UpdateInject(sess.ID, in); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.db.Exec(`ALTER TABLE injects DROP COLUMN released`); err != nil {
+		t.Fatal(err)
+	}
+
+	st = openAt(t, path)
+	if got, ok, err := st.GetInject(sess.ID, in.ID); err != nil || !ok || !got.Released {
+		t.Fatalf("after reopening: %+v, %v, %v; want released", got, ok, err)
 	}
 }

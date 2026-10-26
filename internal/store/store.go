@@ -156,6 +156,7 @@ CREATE TABLE IF NOT EXISTS injects (
 	title       TEXT NOT NULL,
 	pdf_name    TEXT NOT NULL DEFAULT '',
 	open        INTEGER NOT NULL DEFAULT 0,
+	released    INTEGER NOT NULL DEFAULT 0,
 	deadline    INTEGER NOT NULL,
 	created_at  INTEGER NOT NULL,
 	grade       INTEGER,
@@ -209,11 +210,29 @@ func Open(path string) (*Store, error) {
 		db.Close()
 		return nil, err
 	}
+	if err := s.addInjectsReleased(); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("store: upgrading injects in %s: %w", path, err)
+	}
 	if err := s.resetRunStateToSafeDefault(); err != nil {
 		db.Close()
 		return nil, err
 	}
 	return s, nil
+}
+
+// addInjectsReleased adds injects.released to a database whose injects table
+// predates it, marking every inject already open or approved as released.
+func (s *Store) addInjectsReleased() error {
+	has, err := s.hasColumn("injects", "released")
+	if err != nil || has {
+		return err
+	}
+	if _, err := s.db.Exec(`ALTER TABLE injects ADD COLUMN released INTEGER NOT NULL DEFAULT 0`); err != nil {
+		return err
+	}
+	_, err = s.db.Exec(`UPDATE injects SET released = 1 WHERE open = 1 OR approved_at IS NOT NULL`)
+	return err
 }
 
 // requireCurrentSchema fails when the database at path was created before

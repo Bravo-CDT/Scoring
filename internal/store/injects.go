@@ -14,11 +14,14 @@ var ErrInjectApproved = errors.New("store: inject already approved")
 // Inject is a written task for one team. Grade is set while it's being graded;
 // Points and ApprovedAt once it's approved.
 type Inject struct {
-	ID         int64
-	Team       string
-	Title      string
-	PDFName    string // the instructions' original file name; "" when none uploaded
-	Open       bool
+	ID      int64
+	Team    string
+	Title   string
+	PDFName string // the instructions' original file name; "" when none uploaded
+	Open    bool
+	// Released is whether the inject has ever been opened: its team sees
+	// the instructions from then on.
+	Released   bool
 	Deadline   time.Time
 	CreatedAt  time.Time
 	Grade      *int
@@ -37,13 +40,13 @@ type Submission struct {
 	SubmittedAt time.Time
 }
 
-const injectColumns = `id, team, title, pdf_name, open, deadline, created_at, grade, points, approved_at`
+const injectColumns = `id, team, title, pdf_name, open, released, deadline, created_at, grade, points, approved_at`
 
 func scanInject(row interface{ Scan(...any) error }) (Inject, error) {
 	var in Inject
 	var deadline, created int64
 	var grade, points, approved sql.NullInt64
-	if err := row.Scan(&in.ID, &in.Team, &in.Title, &in.PDFName, &in.Open, &deadline, &created, &grade, &points, &approved); err != nil {
+	if err := row.Scan(&in.ID, &in.Team, &in.Title, &in.PDFName, &in.Open, &in.Released, &deadline, &created, &grade, &points, &approved); err != nil {
 		return Inject{}, err
 	}
 	in.Deadline = time.UnixMilli(deadline).UTC()
@@ -117,17 +120,17 @@ func (s *Store) ListInjects(sessionID int64, team string) ([]Inject, error) {
 	return out, nil
 }
 
-// UpdateInject saves in's title, open state, deadline, PDF name and grade.
-// Approval is ApproveInject's alone.
+// UpdateInject saves in's title, open state, deadline, PDF name and grade,
+// and marks it released once it's open. Approval is ApproveInject's alone.
 func (s *Store) UpdateInject(sessionID int64, in Inject) error {
 	var grade sql.NullInt64
 	if in.Grade != nil {
 		grade = sql.NullInt64{Int64: int64(*in.Grade), Valid: true}
 	}
 	_, err := s.db.Exec(
-		`UPDATE injects SET title = ?, open = ?, deadline = ?, pdf_name = ?, grade = ?
+		`UPDATE injects SET title = ?, open = ?, released = released OR ?, deadline = ?, pdf_name = ?, grade = ?
 		 WHERE session_id = ? AND id = ?`,
-		in.Title, in.Open, in.Deadline.UnixMilli(), in.PDFName, grade, sessionID, in.ID)
+		in.Title, in.Open, in.Open, in.Deadline.UnixMilli(), in.PDFName, grade, sessionID, in.ID)
 	if err != nil {
 		return fmt.Errorf("store: updating inject %d: %w", in.ID, err)
 	}
