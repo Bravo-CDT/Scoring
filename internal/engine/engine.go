@@ -20,8 +20,10 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
+	"github.com/Bravo-CDT/Scoring/internal/checks"
 	"github.com/Bravo-CDT/Scoring/internal/config"
 	"github.com/Bravo-CDT/Scoring/internal/scheduler"
 	"github.com/Bravo-CDT/Scoring/internal/store"
@@ -52,6 +54,17 @@ const MaxAdjustmentPoints = 1_000_000
 // MaxAdjustmentPoints.
 var ErrInvalidAdjustment = errors.New("engine: invalid score adjustment")
 
+// Errors SetCredential returns for a change it refuses. Their messages are
+// shown to the blue team as they are.
+var (
+	ErrNotCredentialed = errors.New("this service's check does not log in with a username and password")
+	ErrUserNotAllowed  = errors.New("that user is not one of the allowed users")
+	ErrInvalidPassword = errors.New("the password must be 1 to 256 bytes, with no control characters")
+)
+
+// maxCredentialPassword bounds a blue team password, in bytes.
+const maxCredentialPassword = 256
+
 // Event types the Engine writes.
 const (
 	EventEngineStarted         = "engine_started"
@@ -73,6 +86,8 @@ const (
 	EventDatabaseBackedUp      = "database_backed_up"
 	EventRoundReset            = "round_reset"
 	EventStartingScoreChanged  = "starting_score_changed"
+	EventCredentialChanged     = "credential_changed"
+	EventCredentialReset       = "credential_reset"
 )
 
 // StartFailure reports one service whose routine failed to start, for the
@@ -124,6 +139,8 @@ type Actor string
 const (
 	ActorAdmin  Actor = "admin"
 	ActorSystem Actor = "system"
+	// ActorBlueTeam is the blue team, changing a check's credentials.
+	ActorBlueTeam Actor = "blue_team"
 )
 
 // Engine is the control plane for one session. It is safe for concurrent use.
@@ -162,6 +179,64 @@ type Engine struct {
 	// control-operation lock.
 	configHashMu sync.Mutex
 	configHash   string
+
+	// layout is the network diagram's labels and each service's host, from
+	// the config last loaded (at startup and on every successful Reload).
+	// Nil until then.
+	layout atomic.Pointer[layout]
+	// blueLogin is whether the app has a blue team login, which, like the
+	// admin's, is read at startup only.
+	blueLogin atomic.Bool
+}
+
+// layout is what Status reports about the network, beyond up/down.
+type layout struct {
+	networks []Network
+	hosts    []Host
+	services map[string]serviceLayout
+	// blueTeam is whether the config has a blue_team section, and
+	// allowedUsers its allowed_users.
+	blueTeam     bool
+	allowedUsers []string
+}
+
+type serviceLayout struct {
+	host      string
+	checkType string
+	port      int
+	// credentialed is whether the service's check logs in with a username
+	// and password the blue team can change; defaultUser is the config's.
+	credentialed bool
+	defaultUser  string
+}
+
+// newLayout picks the diagram's details out of cfg.
+func newLayout(cfg *config.Config) *layout {
+	l := &layout{
+		networks: make([]Network, 0, len(cfg.Networks)),
+		hosts:    make([]Host, 0, len(cfg.Hosts)),
+		services: make(map[string]serviceLayout, len(cfg.Services)),
+	}
+	for _, n := range cfg.Networks {
+		l.networks = append(l.networks, Network{CIDR: n.CIDR, Name: n.Name})
+	}
+	for _, h := range cfg.Hosts {
+		l.hosts = append(l.hosts, Host{Address: h.Address, Name: h.Name, OS: h.OS})
+	}
+	for _, sc := range cfg.Services {
+		// Every check type with a port takes it as an integer "port" param.
+		port, _ := sc.Params["port"].(int)
+		user, credentialed := checks.DefaultUsername(sc.CheckType, sc.Params)
+		l.services[sc.Name] = serviceLayout{
+			host: sc.Host, checkType: sc.CheckType, port: port,
+			credentialed: credentialed, defaultUser: user,
+		}
+	}
+	if cfg.BlueTeam != nil {
+		l.blueTeam = true
+		l.allowedUsers = slices.Clone(cfg.BlueTeam.AllowedUsers)
+	}
+	return l
 }
 
 // New wires a store, a session and a scheduler together. configPath is the
@@ -489,6 +564,7 @@ func (e *Engine) ReloadAs(actor Actor, configPath string) (ReloadResult, error) 
 		return res, fmt.Errorf("engine: reloading config: %w", err)
 	}
 	e.recordLoadedConfigHash(configPath)
+	e.layout.Store(newLayout(cfg))
 	if err := e.applyStartingScore(actor, cfg.StartingScore); err != nil {
 		return res, err
 	}
@@ -643,7 +719,7 @@ func (e *Engine) ResetRound(backup bool) (string, error) {
 	// The engine is stopped (checked above), so no service is enabled and
 	// no round can be recorded under the old numbering.
 	e.scheduler.ResetRounds()
-	if err := e.logEngineEvent(ActorAdmin, EventRoundReset, "round reset: score and check history cleared"); err != nil {
+	if err := e.logEngineEvent(ActorAdmin, EventRoundReset, "round reset: score and check history cleared, credentials reset to defaults"); err != nil {
 		return path, err
 	}
 	return path, nil
@@ -737,6 +813,25 @@ type ServiceStatus struct {
 	LastCheckTime       *time.Time `json:"last_check_time,omitempty"`
 	LatencyMS           int64      `json:"latency_ms"`
 	ConsecutiveFailures int        `json:"consecutive_failures"`
+	// Host, CheckType and Port come from the service's config entry; Port is
+	// omitted for a check type without one.
+	Host      string `json:"host"`
+	CheckType string `json:"check_type"`
+	Port      int    `json:"port,omitempty"`
+}
+
+// Network is a named subnet for the scoreboard's network diagram.
+type Network struct {
+	CIDR string `json:"cidr"`
+	Name string `json:"name,omitempty"`
+}
+
+// Host is a checked machine's name and operating system, for the
+// scoreboard's network diagram.
+type Host struct {
+	Address string `json:"address"`
+	Name    string `json:"name,omitempty"`
+	OS      string `json:"os,omitempty"`
 }
 
 // Status is a point-in-time view of the session: score, run state, round
@@ -758,6 +853,11 @@ type Status struct {
 	// while unset.
 	CountdownTarget *time.Time      `json:"countdown_target,omitempty"`
 	Services        []ServiceStatus `json:"services"`
+	Networks        []Network       `json:"networks"`
+	Hosts           []Host          `json:"hosts"`
+	// CredentialsEnabled is whether the blue team credentials page is on
+	// (the config has a blue_team section).
+	CredentialsEnabled bool `json:"credentials_enabled"`
 }
 
 // Status reports the session's current state. It does not wait for control
@@ -782,6 +882,7 @@ func (e *Engine) Status() (Status, error) {
 	}
 
 	round, nextRoundAt := e.scheduler.RoundStatus()
+	l := e.currentLayout()
 
 	out := Status{
 		SessionName:     e.session.Name,
@@ -795,6 +896,10 @@ func (e *Engine) Status() (Status, error) {
 		NextRoundAt:     nextRoundAt,
 		CountdownTarget: rs.CountdownTarget,
 		Services:        make([]ServiceStatus, 0, len(svcs)),
+		Networks:        l.networks,
+		Hosts:           l.hosts,
+
+		CredentialsEnabled: e.blueLogin.Load() && l.blueTeam,
 	}
 	for _, svc := range svcs {
 		ss := ServiceStatus{
@@ -802,6 +907,9 @@ func (e *Engine) Status() (Status, error) {
 			RoutineEnabled: e.scheduler.IsRunning(svc.ID),
 			Checking:       e.scheduler.IsChecking(svc.ID),
 			ScoringPaused:  svc.ScoringPaused,
+			Host:           l.services[svc.Name].host,
+			CheckType:      l.services[svc.Name].checkType,
+			Port:           l.services[svc.Name].port,
 		}
 		latest, err := e.store.GetLatestCheckResult(svc.ID)
 		if err != nil {

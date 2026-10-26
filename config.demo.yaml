@@ -34,3 +34,9 @@ services:
     points_per_failure: 20
     params:
       port: 18083
+
+# Labels for the scoreboard's network diagram (no effect on checks).
+hosts:
+  - address: 127.0.0.1
+    name: localhost
+    os: linux

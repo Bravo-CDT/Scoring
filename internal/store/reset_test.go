@@ -14,9 +14,15 @@ func TestResetRoundData_ClearsScoreAndCheckHistoryButNothingElse(t *testing.T) {
 		t.Fatalf("RecordLedgerEntry: %v", err)
 	}
 	insertEventAt(t, st, sess.ID, "something_happened", time.Now())
+	if err := st.SetCredentialOverride(sess.ID, CredentialOverride{Service: "svc1", Username: "u", Password: "p", ChangedAt: time.Now()}); err != nil {
+		t.Fatalf("SetCredentialOverride: %v", err)
+	}
 
 	if err := st.ResetRoundData(sess.ID); err != nil {
 		t.Fatalf("ResetRoundData: %v", err)
+	}
+	if overrides, err := st.CredentialOverrides(sess.ID); err != nil || len(overrides) != 0 {
+		t.Fatalf("credential overrides after reset = %v, %v; want none", overrides, err)
 	}
 
 	blue, red, err := st.GetScore(sess.ID)

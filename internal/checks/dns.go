@@ -161,6 +161,16 @@ func parseDNSParams(params map[string]any) (dnsParams, error) {
 	if !ok || name == "" {
 		return dnsParams{}, errMissingRequired("name")
 	}
+	// dnsmessage only checks the total length; a bad label would build an
+	// empty query the server answers with a misleading FORMERR.
+	if len(name) > 253 {
+		return dnsParams{}, fmt.Errorf("param %q is longer than 253 bytes", "name")
+	}
+	for label := range strings.SplitSeq(strings.TrimSuffix(name, "."), ".") {
+		if label == "" || len(label) > 63 {
+			return dnsParams{}, fmt.Errorf("param %q must be dot-separated labels of 1 to 63 bytes, got %q", "name", name)
+		}
+	}
 	var expectIP net.IP
 	if s, ok, err := stringParam(params, "expect_ip"); err != nil {
 		return dnsParams{}, err

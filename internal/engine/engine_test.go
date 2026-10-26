@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 	"sync"
@@ -820,8 +821,12 @@ func TestResetRound_RestartsRoundNumbering(t *testing.T) {
 		t.Fatalf("Round after reset = %d, want 0", got)
 	}
 	h.start(t)
-	waitFor(t, "a round after the reset", func() bool { return h.status(t).Round >= 1 })
-	if got := h.status(t).Round; got != 1 {
+	waitFor(t, "a check after the reset", func() bool { return h.countResults(t, "svc1") > 0 })
+	mustDo(t, "Stop", h.e.Stop())
+	// Rounds are 20ms, so read the recorded results, not the live round.
+	rs, err := h.st.ListCheckResults(h.service(t, "svc1").ID, 1000, 0)
+	mustDo(t, "ListCheckResults", err)
+	if got := rs[len(rs)-1].Round; got != 1 {
 		t.Errorf("first round after reset = %d, want 1", got)
 	}
 }
@@ -1220,13 +1225,13 @@ func TestStatus_JSONShape(t *testing.T) {
 	var got map[string]any
 	mustDo(t, "Unmarshal", json.Unmarshal(raw, &got))
 	for _, key := range []string{"session_name", "starting_score", "blue_score", "red_score",
-		"engine_state", "scoring_paused", "server_time", "round", "next_round_at", "services"} {
+		"engine_state", "scoring_paused", "server_time", "round", "next_round_at", "services", "networks", "hosts", "credentials_enabled"} {
 		if _, ok := got[key]; !ok {
 			t.Errorf("status JSON missing %q: %s", key, raw)
 		}
 	}
 	svc := got["services"].([]any)[0].(map[string]any)
-	for _, key := range []string{"name", "up", "routine_enabled", "scoring_paused", "latency_ms", "consecutive_failures"} {
+	for _, key := range []string{"name", "up", "routine_enabled", "scoring_paused", "latency_ms", "consecutive_failures", "host", "check_type"} {
 		if _, ok := svc[key]; !ok {
 			t.Errorf("service JSON missing %q: %s", key, raw)
 		}
@@ -1238,6 +1243,36 @@ func TestStatus_JSONShape(t *testing.T) {
 	// No admin has set a countdown, so there is no target to report.
 	if _, ok := got["countdown_target"]; ok {
 		t.Errorf("countdown_target present before one was set: %s", raw)
+	}
+}
+
+// Status carries what the network diagram needs from the loaded config: each
+// service's host, check type and port, plus the networks and hosts sections.
+func TestStatus_ReportsLayoutFromLoadedConfig(t *testing.T) {
+	h := newHarness(t, okCheck, "svc1")
+	h.writeConfig(t, configYAML("svc1")+`
+networks:
+  - cidr: 127.0.0.0/8
+    name: loopback
+hosts:
+  - address: 127.0.0.1
+    name: box
+    os: linux
+`)
+	if _, err := h.e.Reload(""); err != nil {
+		t.Fatalf("Reload: %v", err)
+	}
+
+	st := h.status(t)
+	svc := st.Services[0]
+	if svc.Host != "127.0.0.1" || svc.CheckType != "tcp_connect" || svc.Port != 9 {
+		t.Errorf("service layout = %q %q %d, want 127.0.0.1 tcp_connect 9", svc.Host, svc.CheckType, svc.Port)
+	}
+	if want := []Network{{CIDR: "127.0.0.0/8", Name: "loopback"}}; !reflect.DeepEqual(st.Networks, want) {
+		t.Errorf("Networks = %+v, want %+v", st.Networks, want)
+	}
+	if want := []Host{{Address: "127.0.0.1", Name: "box", OS: "linux"}}; !reflect.DeepEqual(st.Hosts, want) {
+		t.Errorf("Hosts = %+v, want %+v", st.Hosts, want)
 	}
 }
 
@@ -1348,5 +1383,172 @@ func TestConcurrentControlOperations(t *testing.T) {
 	mustDo(t, "final Stop", h.e.Stop())
 	if ids := h.e.scheduler.RunningServiceIDs(); len(ids) != 0 {
 		t.Errorf("routines %v left running after the engine stopped", ids)
+	}
+}
+
+// credentialsConfig is a config with one credentialed service (db, postgres)
+// and one without credentials (web), plus a blue_team section.
+func credentialsConfig() string {
+	return configWithServices(svcYAML("web", 10)+`
+  - name: db
+    host: 10.0.0.2
+    check_type: postgres
+    points_per_failure: 10
+    params: {port: 5432, user: mrkrabs, password: pw1, dbname: d}
+`) + fmt.Sprintf(`
+hosts:
+  - {address: 10.0.0.2, name: pattyvault}
+blue_team:
+  username: blue
+  password_hash: %q
+  allowed_users: [mrkrabs, patrick]
+`, adminHash)
+}
+
+// newCredentialsHarness is a harness loaded with credentialsConfig.
+func newCredentialsHarness(t *testing.T) *harness {
+	t.Helper()
+	h := newHarness(t, okCheck, "web", "db")
+	h.writeConfig(t, credentialsConfig())
+	if _, err := h.e.Reload(""); err != nil {
+		t.Fatalf("Reload: %v", err)
+	}
+	h.e.EnableBlueTeamLogin()
+	return h
+}
+
+// A blue_team section added by a reload, with no blue team login since
+// startup, leaves the feature off: no page, and no overrides applied.
+func TestCredentials_OffWithoutBlueTeamLogin(t *testing.T) {
+	h := newHarness(t, okCheck, "web", "db")
+	h.writeConfig(t, credentialsConfig())
+	_, err := h.e.Reload("")
+	mustDo(t, "Reload", err)
+	mustDo(t, "SetOverride", h.st.SetCredentialOverride(h.e.session.ID,
+		store.CredentialOverride{Service: "db", Username: "patrick", Password: "pw2", ChangedAt: time.Now()}))
+	if h.status(t).CredentialsEnabled {
+		t.Error("CredentialsEnabled = true without a blue team login")
+	}
+	got, err := h.e.CredentialOverrides()
+	mustDo(t, "CredentialOverrides", err)
+	if len(got) != 0 {
+		t.Errorf("overrides without a blue team login = %+v, want none", got)
+	}
+}
+
+func TestCredentials_ListsCredentialedServicesWithDefaults(t *testing.T) {
+	h := newCredentialsHarness(t)
+	got, err := h.e.Credentials()
+	mustDo(t, "Credentials", err)
+	want := Credentials{
+		AllowedUsers: []string{"mrkrabs", "patrick"},
+		Entries:      []CredentialEntry{{Service: "db", Host: "10.0.0.2", HostName: "pattyvault", Username: "mrkrabs"}},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("Credentials = %+v, want %+v", got, want)
+	}
+	if !h.status(t).CredentialsEnabled {
+		t.Errorf("CredentialsEnabled = false with a blue_team section")
+	}
+}
+
+func TestSetCredential_StoresAndLogsWithoutPassword(t *testing.T) {
+	h := newCredentialsHarness(t)
+	entry, err := h.e.SetCredential("db", "patrick", "s3cret-pw")
+	mustDo(t, "SetCredential", err)
+	if entry.Username != "patrick" || entry.ChangedAt == nil {
+		t.Errorf("entry = %+v, want patrick with a ChangedAt", entry)
+	}
+	overrides, err := h.st.CredentialOverrides(h.sess.ID)
+	mustDo(t, "CredentialOverrides", err)
+	if o := overrides["db"]; o.Username != "patrick" || o.Password != "s3cret-pw" {
+		t.Errorf("stored override = %+v", o)
+	}
+	last := h.lastEvent(t, EventCredentialChanged)
+	if last.Actor != string(ActorBlueTeam) {
+		t.Errorf("credential_changed actor = %q, want blue_team", last.Actor)
+	}
+	if strings.Contains(last.Message+last.Detail, "s3cret-pw") {
+		t.Errorf("event %q leaks the password", last.Message)
+	}
+}
+
+func TestSetCredential_Rejects(t *testing.T) {
+	h := newCredentialsHarness(t)
+	tests := []struct {
+		service, user, password string
+		want                    error
+	}{
+		{"db", "jellyfish", "pw", ErrUserNotAllowed},
+		{"web", "patrick", "pw", ErrNotCredentialed},
+		{"nope", "patrick", "pw", ErrServiceNotFound},
+		{"db", "patrick", "", ErrInvalidPassword},
+		{"db", "patrick", strings.Repeat("x", 257), ErrInvalidPassword},
+		{"db", "patrick", "pw\x00", ErrInvalidPassword},
+		{"db", "patrick", "pw\n", ErrInvalidPassword},
+	}
+	for _, tt := range tests {
+		if _, err := h.e.SetCredential(tt.service, tt.user, tt.password); !errors.Is(err, tt.want) {
+			t.Errorf("SetCredential(%q, %q, len %d) = %v, want %v", tt.service, tt.user, len(tt.password), err, tt.want)
+		}
+	}
+}
+
+func TestResetCredential_BackToDefault(t *testing.T) {
+	h := newCredentialsHarness(t)
+	_, err := h.e.SetCredential("db", "patrick", "pw2")
+	mustDo(t, "SetCredential", err)
+	entry, err := h.e.ResetCredential("db")
+	mustDo(t, "ResetCredential", err)
+	if entry.Username != "mrkrabs" || entry.ChangedAt != nil {
+		t.Errorf("entry after reset = %+v, want the default mrkrabs, unchanged", entry)
+	}
+}
+
+// Resetting a service already on its defaults changes nothing, so logs nothing.
+func TestResetCredential_UnchangedLogsNothing(t *testing.T) {
+	h := newCredentialsHarness(t)
+	_, err := h.e.ResetCredential("db")
+	mustDo(t, "ResetCredential", err)
+	for _, ev := range h.events(t) {
+		if ev.Type == EventCredentialReset {
+			t.Errorf("logged %q for a service with no change to reset", ev.Message)
+		}
+	}
+}
+
+func TestResetRound_ClearsCredentials(t *testing.T) {
+	h := newCredentialsHarness(t)
+	_, err := h.e.SetCredential("db", "patrick", "pw2")
+	mustDo(t, "SetCredential", err)
+	_, err = h.e.ResetRound(false)
+	mustDo(t, "ResetRound", err)
+	got, err := h.e.Credentials()
+	mustDo(t, "Credentials", err)
+	if got.Entries[0].ChangedAt != nil {
+		t.Errorf("entry after round reset = %+v, want back on defaults", got.Entries[0])
+	}
+}
+
+// Overrides apply only while the config has a blue_team section: removing it
+// turns the feature off, so checks go back to the config's credentials.
+func TestCredentialOverrides_OnlyWhileBlueTeamConfigured(t *testing.T) {
+	h := newCredentialsHarness(t)
+	_, err := h.e.SetCredential("db", "patrick", "pw2")
+	mustDo(t, "SetCredential", err)
+	got, err := h.e.CredentialOverrides()
+	mustDo(t, "CredentialOverrides", err)
+	if c := got["db"]; c.Username != "patrick" || c.Password != "pw2" {
+		t.Fatalf("overrides with blue_team = %+v, want db as patrick", got)
+	}
+
+	cfg := credentialsConfig()
+	h.writeConfig(t, cfg[:strings.Index(cfg, "blue_team:")])
+	_, err = h.e.Reload("")
+	mustDo(t, "Reload", err)
+	got, err = h.e.CredentialOverrides()
+	mustDo(t, "CredentialOverrides", err)
+	if len(got) != 0 {
+		t.Errorf("overrides without blue_team = %+v, want none", got)
 	}
 }

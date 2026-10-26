@@ -117,6 +117,9 @@ func build(opts Options, cfg *config.Config, st *store.Store) (*App, error) {
 	sc := scorer.New(st, sess.ID)
 	sched := scheduler.New(registry, sc, opts.ConfigPath, time.Duration(cfg.RoundIntervalSeconds)*time.Second)
 	eng := engine.New(st, sess, sched, opts.ConfigPath)
+	// Each round checks with the blue team's credential changes, read fresh
+	// from the database, so a change or reset applies from the next round.
+	sched.SetCredentialSource(eng.CredentialOverrides)
 
 	// Sync the session's services with the config through the same path as
 	// /reload: services new to the file are created (or reactivated with their
@@ -154,6 +157,11 @@ func build(opts Options, cfg *config.Config, st *store.Store) (*App, error) {
 	var apiOpts []api.Option
 	if opts.WebDir != "" {
 		apiOpts = append(apiOpts, api.WithFallback(NewStaticHandler(opts.WebDir)))
+	}
+	// Like the admin's, the blue team login is read at startup only.
+	if cfg.BlueTeam != nil {
+		apiOpts = append(apiOpts, api.WithBlueTeam(auth.New(cfg.BlueTeam.Username, cfg.BlueTeam.PasswordHash)))
+		eng.EnableBlueTeamLogin()
 	}
 	// Started last, so no error path above leaves it running.
 	ctx, cancel := context.WithCancel(context.Background())

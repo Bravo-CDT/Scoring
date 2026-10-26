@@ -7,10 +7,12 @@ interface LoginProps {
   onLogin: (username: string, password: string) => Promise<void>;
   /** Whether the previous session ended because its token stopped working. */
   sessionExpired: boolean;
+  /** The form's heading. */
+  title?: string;
 }
 
-/** The admin login form. */
-export function Login({ onLogin, sessionExpired }: LoginProps) {
+/** A login form: the admin's, or with another title, the blue team's. */
+export function Login({ onLogin, sessionExpired, title = 'Admin login' }: LoginProps) {
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
   const [error, setError] = useState<string | null>(null);
@@ -35,7 +37,7 @@ export function Login({ onLogin, sessionExpired }: LoginProps) {
         <form onSubmit={submit}>
           <Stack>
             <Title order={1} size="h2">
-              Admin login
+              {title}
             </Title>
             {sessionExpired && !error && (
               <Alert color="yellow">Your session has expired or was ended. Log in again to continue.</Alert>

@@ -2,6 +2,7 @@ package config
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
@@ -460,6 +461,36 @@ services:
 			yaml:    strings.Replace(minimalYAML, "points_per_failure: 10", "points_per_failure: -5", 1),
 			wantErr: "points_per_failure",
 		},
+		{
+			name:    "blue_team without a username",
+			yaml:    minimalYAML + blueTeamYAML("", "${TEST_ADMIN_HASH}", "[mrkrabs]"),
+			wantErr: "blue_team.username",
+		},
+		{
+			name:    "blue_team with a bad hash",
+			yaml:    minimalYAML + blueTeamYAML("blue", "not-a-hash", "[mrkrabs]"),
+			wantErr: "blue_team.password_hash",
+		},
+		{
+			name:    "blue_team with no allowed users",
+			yaml:    minimalYAML + blueTeamYAML("blue", "${TEST_ADMIN_HASH}", "[]"),
+			wantErr: "blue_team.allowed_users",
+		},
+		{
+			name:    "blue_team allowing a user twice",
+			yaml:    minimalYAML + blueTeamYAML("blue", "${TEST_ADMIN_HASH}", "[mrkrabs, mrkrabs]"),
+			wantErr: "duplicate",
+		},
+		{
+			name:    "network cidr that isn't one",
+			yaml:    minimalYAML + "networks:\n  - cidr: 10.111.1.0\n",
+			wantErr: "networks[0].cidr",
+		},
+		{
+			name:    "host listed twice",
+			yaml:    minimalYAML + "hosts:\n  - address: 10.0.0.1\n  - address: 10.0.0.1\n",
+			wantErr: "duplicate host",
+		},
 	}
 
 	for _, tt := range tests {
@@ -567,5 +598,39 @@ func TestLoadForChecks_ToleratesUnsetAdminHash(t *testing.T) {
 	bad := strings.Replace(yml, "check_type: tcp_connect", "check_type: not_a_real_check", 1)
 	if _, _, err := LoadForChecks(writeTemp(t, bad)); err == nil || !strings.Contains(err.Error(), "not_a_real_check") {
 		t.Errorf("LoadForChecks with a bad check_type: err = %v, want it to name the unknown check type", err)
+	}
+}
+
+// blueTeamYAML renders a blue_team section to append to a config.
+func blueTeamYAML(username, hash, allowedUsers string) string {
+	return fmt.Sprintf("blue_team:\n  username: %q\n  password_hash: %q\n  allowed_users: %s\n", username, hash, allowedUsers)
+}
+
+func TestLoad_BlueTeamOptional(t *testing.T) {
+	setHash(t)
+	cfg, err := Load(writeTemp(t, minimalYAML))
+	if err != nil {
+		t.Fatalf("Load without blue_team: %v", err)
+	}
+	if cfg.BlueTeam != nil {
+		t.Errorf("BlueTeam = %+v, want nil when the section is absent", cfg.BlueTeam)
+	}
+
+	cfg, err = Load(writeTemp(t, minimalYAML+blueTeamYAML("blue", "${TEST_ADMIN_HASH}", "[mrkrabs, sandy]")))
+	if err != nil {
+		t.Fatalf("Load with blue_team: %v", err)
+	}
+	if cfg.BlueTeam == nil || cfg.BlueTeam.Username != "blue" || !slices.Equal(cfg.BlueTeam.AllowedUsers, []string{"mrkrabs", "sandy"}) {
+		t.Errorf("BlueTeam = %+v, want blue with [mrkrabs sandy]", cfg.BlueTeam)
+	}
+}
+
+func TestLoadForChecks_ToleratesUnsetBlueHash(t *testing.T) {
+	const unsetVar = "SOME_UNSET_BLUE_VAR_XYZ"
+	os.Unsetenv(unsetVar)
+	setHash(t)
+	yml := minimalYAML + blueTeamYAML("blue", "${"+unsetVar+"}", "[mrkrabs]")
+	if _, _, err := LoadForChecks(writeTemp(t, yml)); err != nil {
+		t.Fatalf("LoadForChecks: %v", err)
 	}
 }

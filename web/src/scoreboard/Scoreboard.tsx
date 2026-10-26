@@ -1,25 +1,12 @@
-import {
-  Alert,
-  Badge,
-  Button,
-  Center,
-  Container,
-  Group,
-  Loader,
-  Paper,
-  SimpleGrid,
-  Stack,
-  Text,
-  Title,
-  UnstyledButton,
-} from '@mantine/core';
+import { Alert, Badge, Anchor, Center, Group, Loader, Stack, Text, Title } from '@mantine/core';
 import { useEffect, useState } from 'react';
-import type { ServiceStatus, Status } from '../api/client';
+import type { Status } from '../api/client';
+import { NetworkDiagram } from './NetworkDiagram';
+import classes from './Scoreboard.module.css';
 import { ServiceHistory } from './ServiceHistory';
-import { StateBadge } from './StateBadge';
 import { useStatusPolling } from './useStatusPolling';
 
-/** The public scoreboard: scores, services' up/down state, and the countdown. */
+/** The public scoreboard: scores, the clocks, and the network diagram of every service's state. */
 export function Scoreboard() {
   const { status, error, serverClockOffsetMs } = useStatusPolling();
   // The service whose history is open, if any.
@@ -39,53 +26,51 @@ export function Scoreboard() {
   }
 
   return (
-    <Container size="md" py="xl">
-      <Stack gap="lg">
-        <Group justify="space-between" align="baseline">
-          <Title order={1}>{status.session_name}</Title>
-          <Group gap="md" align="baseline">
-            <Freshness status={status} />
-            <Button component="a" href="/admin" variant="subtle" size="xs">
-              Admin
-            </Button>
-          </Group>
-        </Group>
+    <div className={classes.page}>
+      <header className={classes.header}>
+        <Stack gap={4}>
+          <Title order={1} className={classes.title}>
+            {status.session_name}
+          </Title>
+          <Freshness status={status} />
+        </Stack>
 
-        {error && (
-          <Alert color="yellow" title="Connection lost">
-            Showing the last update received; retrying. ({error.message})
-          </Alert>
-        )}
-
-        <SimpleGrid cols={2}>
+        <div className={classes.scores}>
           <TeamScore team="Blue" color="blue" score={status.blue_score} />
           <TeamScore team="Red" color="red" score={status.red_score} />
-        </SimpleGrid>
+        </div>
 
-        {status.engine_state === 'running' && (
-          <Countdown label="Next round in" target={status.next_round_at} serverClockOffsetMs={serverClockOffsetMs} />
-        )}
-
-        {status.countdown_target && (
-          <Countdown label="Time remaining" target={status.countdown_target} serverClockOffsetMs={serverClockOffsetMs} />
-        )}
-
-        <Stack gap="xs">
-          <Title order={2} size="h3">
-            Services
-          </Title>
-          {status.services.length === 0 ? (
-            <Text c="dimmed">No services configured.</Text>
-          ) : (
-            status.services.map((service) => (
-              <ServiceRow key={service.name} service={service} onSelect={() => setHistoryOf(service.name)} />
-            ))
+        <div className={classes.clocks}>
+          {status.engine_state === 'running' && (
+            <Countdown label="Next round in" target={status.next_round_at} serverClockOffsetMs={serverClockOffsetMs} />
           )}
-        </Stack>
-      </Stack>
+          {status.countdown_target && (
+            <Countdown label="Time remaining" target={status.countdown_target} serverClockOffsetMs={serverClockOffsetMs} />
+          )}
+        </div>
+      </header>
+
+      {error && (
+        <Alert color="yellow" title="Connection lost" mb="lg">
+          Showing the last update received; retrying. ({error.message})
+        </Alert>
+      )}
+
+      <NetworkDiagram status={status} onSelectService={setHistoryOf} />
+
+      <Group gap="md" className={classes.links}>
+        {status.credentials_enabled && (
+          <Anchor href="/credentials" c="dimmed" fz="xs">
+            Credentials
+          </Anchor>
+        )}
+        <Anchor href="/admin" c="dimmed" fz="xs">
+          Admin
+        </Anchor>
+      </Group>
 
       {historyOf !== null && <ServiceHistory key={historyOf} name={historyOf} onClose={() => setHistoryOf(null)} />}
-    </Container>
+    </div>
   );
 }
 
@@ -96,7 +81,9 @@ function Freshness({ status }: { status: Status }) {
       <Badge color="gray">Engine stopped</Badge>
     ) : status.scoring_paused ? (
       <Badge color="yellow">Scoring paused</Badge>
-    ) : null;
+    ) : (
+      <Badge color="green">Live</Badge>
+    );
 
   return (
     <Group gap="sm">
@@ -110,37 +97,12 @@ function Freshness({ status }: { status: Status }) {
 
 function TeamScore({ team, color, score }: { team: string; color: string; score: number }) {
   return (
-    <Paper withBorder p="lg" radius="md">
-      <Stack gap={0} align="center">
-        <Text c={color} fw={700} tt="uppercase">
-          {team}
-        </Text>
-        <Text fz={56} fw={800} lh={1.1}>
-          {score}
-        </Text>
-      </Stack>
-    </Paper>
-  );
-}
-
-/** A service's name and up/down state; clicking it opens its history. */
-function ServiceRow({ service, onSelect }: { service: ServiceStatus; onSelect: () => void }) {
-  return (
-    <UnstyledButton onClick={onSelect} aria-haspopup="dialog">
-      <Paper withBorder px="md" py="sm" radius="md">
-        <Group justify="space-between">
-          <Text fw={500}>{service.name}</Text>
-          <Group gap={6}>
-            {service.checking && (
-              <Badge color="blue" variant="light">
-                Scoring…
-              </Badge>
-            )}
-            <StateBadge service={service} />
-          </Group>
-        </Group>
-      </Paper>
-    </UnstyledButton>
+    <div className={classes.team} data-team={color}>
+      <Text c={color} fw={800} tt="uppercase" fz="sm" lts={2}>
+        {team}
+      </Text>
+      <Text className={classes.score}>{score.toLocaleString()}</Text>
+    </div>
   );
 }
 
@@ -176,16 +138,12 @@ function Countdown({
   const remainingMs = Math.max(targetMs - serverNowMs, 0);
 
   return (
-    <Paper withBorder p="md" radius="md">
-      <Stack gap={0} align="center">
-        <Text c="dimmed" size="sm" tt="uppercase">
-          {label}
-        </Text>
-        <Text fz={40} fw={700} ff="monospace">
-          {formatDuration(remainingMs)}
-        </Text>
-      </Stack>
-    </Paper>
+    <div className={classes.clock}>
+      <Text c="dimmed" fz="xs" tt="uppercase" lts={1}>
+        {label}
+      </Text>
+      <Text className={classes.clockTime}>{formatDuration(remainingMs)}</Text>
+    </div>
   );
 }
 

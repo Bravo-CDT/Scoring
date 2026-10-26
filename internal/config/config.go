@@ -19,6 +19,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"net/netip"
 	"os"
 	"regexp"
 	"slices"
@@ -57,6 +58,31 @@ type AdminConfig struct {
 	PasswordHash string `yaml:"password_hash"`
 }
 
+// BlueTeamConfig is the blue team's login to the credentials page, and the
+// accounts they may switch a check to. The login is read at startup only, like
+// the admin's; AllowedUsers applies on /reload.
+type BlueTeamConfig struct {
+	Username     string   `yaml:"username"`
+	PasswordHash string   `yaml:"password_hash"`
+	AllowedUsers []string `yaml:"allowed_users"`
+}
+
+// NetworkConfig names a subnet on the scoreboard's network diagram. It has
+// no effect on checks.
+type NetworkConfig struct {
+	CIDR string `yaml:"cidr"`
+	Name string `yaml:"name"`
+}
+
+// HostConfig describes a checked machine for the scoreboard's network
+// diagram: what it's called and what it runs. It has no effect on checks;
+// services are matched to it by their host.
+type HostConfig struct {
+	Address string `yaml:"address"`
+	Name    string `yaml:"name"`
+	OS      string `yaml:"os"`
+}
+
 // Config is a whole config.yaml.
 type Config struct {
 	SessionName   string `yaml:"session_name"`
@@ -68,6 +94,13 @@ type Config struct {
 	RoundIntervalSeconds int             `yaml:"round_interval_seconds"`
 	Admin                AdminConfig     `yaml:"admin"`
 	Services             []ServiceConfig `yaml:"services"`
+	// Networks and Hosts only label the scoreboard's network diagram; both
+	// are optional and are applied on /reload.
+	Networks []NetworkConfig `yaml:"networks"`
+	Hosts    []HostConfig    `yaml:"hosts"`
+	// BlueTeam turns on the blue team credentials page; nil when the section
+	// is absent, which leaves the feature off.
+	BlueTeam *BlueTeamConfig `yaml:"blue_team"`
 }
 
 // Hash returns the sha256 hex digest of raw config file bytes, used to
@@ -197,7 +230,69 @@ func validate(cfg *Config, withAdmin bool) error {
 			return fmt.Errorf("admin.password_hash is not a valid bcrypt hash: %w", err)
 		}
 	}
-	return validateServices(cfg.Services)
+	if err := validateServices(cfg.Services); err != nil {
+		return err
+	}
+	if cfg.BlueTeam != nil {
+		if err := validateBlueTeam(cfg.BlueTeam, withAdmin); err != nil {
+			return err
+		}
+	}
+	return validateLayout(cfg.Networks, cfg.Hosts)
+}
+
+// validateBlueTeam checks the blue_team section, its password hash only if
+// withHash is set (the same leniency LoadForChecks gives the admin's).
+func validateBlueTeam(bt *BlueTeamConfig, withHash bool) error {
+	if bt.Username == "" {
+		return errors.New("blue_team.username is required")
+	}
+	if withHash {
+		if _, err := bcrypt.Cost([]byte(bt.PasswordHash)); err != nil {
+			return fmt.Errorf("blue_team.password_hash is not a valid bcrypt hash: %w", err)
+		}
+	}
+	if len(bt.AllowedUsers) == 0 {
+		return errors.New("blue_team.allowed_users must list at least one user")
+	}
+	seen := make(map[string]struct{}, len(bt.AllowedUsers))
+	for i, u := range bt.AllowedUsers {
+		if u == "" {
+			return fmt.Errorf("blue_team.allowed_users[%d] is empty", i)
+		}
+		if _, dup := seen[u]; dup {
+			return fmt.Errorf("blue_team.allowed_users: duplicate user %q", u)
+		}
+		seen[u] = struct{}{}
+	}
+	return nil
+}
+
+// validateLayout checks the diagram labels: every network a valid CIDR and
+// every host an address, with neither listed twice.
+func validateLayout(networks []NetworkConfig, hosts []HostConfig) error {
+	seenNets := make(map[netip.Prefix]struct{}, len(networks))
+	for i, n := range networks {
+		prefix, err := netip.ParsePrefix(n.CIDR)
+		if err != nil {
+			return fmt.Errorf("networks[%d].cidr: %w", i, err)
+		}
+		if _, dup := seenNets[prefix.Masked()]; dup {
+			return fmt.Errorf("duplicate network %q", n.CIDR)
+		}
+		seenNets[prefix.Masked()] = struct{}{}
+	}
+	seenHosts := make(map[string]struct{}, len(hosts))
+	for i, h := range hosts {
+		if h.Address == "" {
+			return fmt.Errorf("hosts[%d].address is required", i)
+		}
+		if _, dup := seenHosts[h.Address]; dup {
+			return fmt.Errorf("duplicate host %q", h.Address)
+		}
+		seenHosts[h.Address] = struct{}{}
+	}
+	return nil
 }
 
 // validateServices checks every service entry: unique names, a host, a known

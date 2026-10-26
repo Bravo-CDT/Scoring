@@ -1,0 +1,234 @@
+/*
+ * The network diagram: the scoring engine at the top, a backbone line to
+ * each network, and inside each network a bus line down the left with every
+ * host branching off it. Lines take their host's health colour.
+ */
+
+.diagram {
+  --line: var(--mantine-color-dark-4);
+  --line-width: 2px;
+  --drop: 20px;
+  --bus-indent: 18px;
+  --stub: 26px;
+  --host-gap: var(--mantine-spacing-sm);
+  /* Where a host's stub meets its card: level with the host's name. */
+  --stub-top: 22px;
+}
+
+.engine {
+  display: flex;
+  align-items: center;
+  gap: var(--mantine-spacing-sm);
+  width: fit-content;
+  margin-inline: auto;
+  padding: var(--mantine-spacing-sm) var(--mantine-spacing-lg);
+  border: var(--line-width) solid var(--mantine-color-cyan-filled);
+  border-radius: var(--mantine-radius-xl);
+  background: var(--mantine-color-dark-6);
+  position: relative;
+}
+
+.engine::after {
+  content: '';
+  position: absolute;
+  left: 50%;
+  top: 100%;
+  height: var(--drop);
+  border-left: var(--line-width) solid var(--line);
+}
+
+.networks {
+  display: grid;
+  grid-template-columns: repeat(var(--network-count), minmax(0, 1fr));
+  gap: var(--mantine-spacing-xl);
+  margin-top: calc(var(--drop) * 2);
+  position: relative;
+}
+
+/* The backbone: from the middle of the first network to the middle of the last. */
+.networks::before {
+  content: '';
+  position: absolute;
+  top: calc(var(--drop) * -1);
+  --column-middle: calc((100% - (var(--network-count) - 1) * var(--mantine-spacing-xl)) / (2 * var(--network-count)));
+  left: var(--column-middle);
+  right: var(--column-middle);
+  border-top: var(--line-width) solid var(--line);
+}
+
+.network {
+  position: relative;
+  min-width: 0;
+}
+
+/* Each network's drop from the backbone. */
+.network::before {
+  content: '';
+  position: absolute;
+  left: 50%;
+  top: calc(var(--drop) * -1);
+  height: var(--drop);
+  border-left: var(--line-width) solid var(--line);
+}
+
+.subnet {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--mantine-spacing-sm);
+  padding: var(--mantine-spacing-sm) var(--mantine-spacing-md);
+  border: var(--line-width) solid var(--line);
+  border-radius: var(--mantine-radius-md);
+  background: var(--mantine-color-dark-6);
+}
+
+.hosts {
+  display: flex;
+  flex-direction: column;
+  gap: var(--host-gap);
+  margin-top: var(--host-gap);
+  margin-left: var(--bus-indent);
+  padding-left: var(--stub);
+}
+
+.host {
+  position: relative;
+  padding: var(--mantine-spacing-xs) var(--mantine-spacing-md) var(--mantine-spacing-sm);
+  border: var(--line-width) solid var(--host-colour);
+  border-radius: var(--mantine-radius-md);
+  background: var(--mantine-color-dark-6);
+}
+
+/* The host's stub off the bus, in its own colour. */
+.host::before {
+  content: '';
+  position: absolute;
+  left: calc(var(--stub) * -1 - var(--line-width));
+  top: var(--stub-top);
+  width: var(--stub);
+  border-top: var(--line-width) solid var(--host-colour);
+}
+
+/* The bus, drawn a host at a time: from the one above down past this one. */
+.host::after {
+  content: '';
+  position: absolute;
+  left: calc(var(--stub) * -1 - var(--line-width));
+  top: calc(var(--host-gap) * -1 - var(--line-width));
+  bottom: calc(var(--line-width) * -1);
+  border-left: var(--line-width) solid var(--line);
+}
+
+/* The last host ends the bus at its own stub. */
+.host:last-child::after {
+  bottom: auto;
+  height: calc(var(--host-gap) + var(--stub-top) + var(--line-width));
+}
+
+.host[data-health='up'] {
+  --host-colour: var(--mantine-color-green-filled);
+}
+
+.host[data-health='down'] {
+  --host-colour: var(--mantine-color-red-filled);
+}
+
+.host[data-health='unknown'] {
+  --host-colour: var(--line);
+}
+
+.hostHeader {
+  display: flex;
+  align-items: center;
+  gap: var(--mantine-spacing-sm);
+  margin-bottom: var(--mantine-spacing-xs);
+}
+
+.services {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.service {
+  display: flex;
+  align-items: center;
+  gap: var(--mantine-spacing-sm);
+  padding: 4px var(--mantine-spacing-sm);
+  border-radius: var(--mantine-radius-sm);
+  border-left: 4px solid var(--service-colour);
+  background: var(--service-tint);
+  width: 100%;
+}
+
+.service:hover {
+  filter: brightness(1.2);
+}
+
+.service[data-health='up'] {
+  --service-colour: var(--mantine-color-green-filled);
+  --service-tint: var(--mantine-color-green-light);
+}
+
+.service[data-health='down'] {
+  --service-colour: var(--mantine-color-red-filled);
+  --service-tint: var(--mantine-color-red-light);
+}
+
+.service[data-health='unknown'] {
+  --service-colour: var(--line);
+  --service-tint: var(--mantine-color-dark-5);
+}
+
+.serviceName {
+  flex: 1;
+  min-width: 0;
+}
+
+/* A brand logo is shown as is; a single-colour one takes the text colour. */
+.logo {
+  flex: none;
+  object-fit: contain;
+}
+
+.monoLogo {
+  flex: none;
+  background-color: currentColor;
+  mask: var(--logo) center / contain no-repeat;
+}
+
+/* A dot that pulses while the service's check is in flight. */
+.checking {
+  flex: none;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--mantine-color-cyan-filled);
+  animation: pulse 1s ease-in-out infinite alternate;
+}
+
+@keyframes pulse {
+  from {
+    opacity: 0.25;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+/* One column on a narrow screen: the backbone has nothing to join. */
+@media (max-width: 62em) {
+  .networks {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .networks::before,
+  .network::before,
+  .engine::after {
+    display: none;
+  }
+
+  .networks {
+    margin-top: var(--mantine-spacing-lg);
+  }
+}

@@ -115,6 +115,8 @@ func TestDNS_Params(t *testing.T) {
 	}{
 		{"missing name", map[string]any{"port": 53}, `"name"`},
 		{"empty name", map[string]any{"port": 53, "name": ""}, `"name"`},
+		{"label over 63 bytes", map[string]any{"port": 53, "name": strings.Repeat("k", 64) + ".krab"}, `"name"`},
+		{"empty label", map[string]any{"port": 53, "name": "krusty..krab"}, `"name"`},
 		{"bad expect_ip", map[string]any{"port": 53, "name": "krusty.krab", "expect_ip": "nope"}, `"expect_ip"`},
 		{"unknown param", map[string]any{"port": 53, "name": "krusty.krab", "bogus": 1}, `"bogus"`},
 		{"missing port", map[string]any{"name": "krusty.krab"}, `"port"`},

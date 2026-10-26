@@ -3,7 +3,6 @@ import {
   Anchor,
   Badge,
   Button,
-  type ButtonProps,
   Center,
   Checkbox,
   Container,
@@ -51,6 +50,8 @@ import {
 } from '../api/client';
 import { StateBadge } from '../scoreboard/StateBadge';
 import { useStatusPolling } from '../scoreboard/useStatusPolling';
+import { ConfirmButton } from './ConfirmButton';
+import { CredentialsSection } from './CredentialsSection';
 import { Login } from './Login';
 import { useAdminSession } from './useAdminSession';
 
@@ -243,6 +244,7 @@ function Console({ send, onLogout }: { send: AuthedFetch; onLogout: () => void }
             <CountdownControl status={status} busy={busy} perform={perform} />
             <DatabaseControls status={status} busy={busy} perform={perform} />
             <ServiceControls services={status.services} busy={busy} perform={perform} />
+            {status.credentials_enabled && <CredentialsSection send={send} />}
           </>
         )}
       </Stack>
@@ -522,7 +524,7 @@ function DatabaseControls({ status, busy, perform }: { status: Status; busy: boo
           color="red"
           disabled={busy || running}
           confirmTitle="Reset for a new round?"
-          confirmMessage="This permanently erases every team's score and every service's check-result history for this competition. Admin history and service configuration are not affected. This cannot be undone except from a backup."
+          confirmMessage="This permanently erases every team's score and every service's check-result history for this competition, and puts every blue team credential change back to the config's defaults. Admin history and service configuration are not affected. This cannot be undone except from a backup."
           onConfirm={(backup) => perform('Reset for a new round', (send) => resetRound(send, backup))}
         >
           Reset for a new round
@@ -643,59 +645,6 @@ function ServiceRow({ service, busy, perform }: { service: ServiceStatus; busy: 
         </Group>
       </Table.Td>
     </Table.Tr>
-  );
-}
-
-interface ConfirmButtonProps extends ButtonProps {
-  disabled?: boolean;
-  'aria-label'?: string;
-  confirmTitle: string;
-  confirmMessage: string;
-  confirmLabel: string;
-  onConfirm: () => void;
-  children: ReactNode;
-}
-
-/**
- * A button for a destructive action: clicking it asks for confirmation, and
- * only confirming runs the action. Cancel has the initial focus, so a stray
- * Enter does not confirm.
- */
-function ConfirmButton({
-  confirmTitle,
-  confirmMessage,
-  confirmLabel,
-  onConfirm,
-  children,
-  ...buttonProps
-}: ConfirmButtonProps) {
-  const [opened, setOpened] = useState(false);
-  const close = () => setOpened(false);
-  return (
-    <>
-      <Button {...buttonProps} onClick={() => setOpened(true)} aria-haspopup="dialog">
-        {children}
-      </Button>
-      <Modal opened={opened} onClose={close} title={confirmTitle} closeButtonProps={{ 'aria-label': 'Close' }}>
-        <Stack>
-          <Text size="sm">{confirmMessage}</Text>
-          <Group justify="flex-end" gap="sm">
-            <Button variant="default" onClick={close} data-autofocus>
-              Cancel
-            </Button>
-            <Button
-              color="red"
-              onClick={() => {
-                close();
-                onConfirm();
-              }}
-            >
-              {confirmLabel}
-            </Button>
-          </Group>
-        </Stack>
-      </Modal>
-    </>
   );
 }
 

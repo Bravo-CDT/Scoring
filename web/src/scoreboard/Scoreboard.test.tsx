@@ -24,6 +24,8 @@ const status: client.Status = {
       scoring_paused: false,
       latency_ms: 4,
       consecutive_failures: 0,
+      host: '10.0.0.1',
+      check_type: 'tcp_connect',
     },
     {
       name: 'dns',
@@ -33,8 +35,13 @@ const status: client.Status = {
       scoring_paused: false,
       latency_ms: 0,
       consecutive_failures: 2,
+      host: '10.0.0.1',
+      check_type: 'tcp_connect',
     },
   ],
+  networks: [],
+  hosts: [],
+  credentials_enabled: false,
 };
 
 afterEach(() => {
@@ -59,6 +66,18 @@ describe('Scoreboard', () => {
     vi.spyOn(client, 'getStatus').mockResolvedValue(status);
     render(<Scoreboard />);
     expect(await screen.findByRole('link', { name: 'Admin' })).toHaveAttribute('href', '/admin');
+  });
+
+  it('links to the credentials page only while it is on', async () => {
+    vi.spyOn(client, 'getStatus').mockResolvedValue({ ...status, credentials_enabled: true });
+    const { unmount } = render(<Scoreboard />);
+    expect(await screen.findByRole('link', { name: 'Credentials' })).toHaveAttribute('href', '/credentials');
+    unmount();
+
+    vi.spyOn(client, 'getStatus').mockResolvedValue(status);
+    render(<Scoreboard />);
+    await screen.findByRole('link', { name: 'Admin' });
+    expect(screen.queryByRole('link', { name: 'Credentials' })).not.toBeInTheDocument();
   });
 
   it('shows a Scoring badge while a service check is in flight', async () => {

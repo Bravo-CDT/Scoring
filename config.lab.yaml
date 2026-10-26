@@ -7,9 +7,9 @@
 # at which point these checks will start failing until this file (or the
 # live service's entry via POST /reload) is updated to match.
 #
-# Before `make run`, still set ADMIN_PASSWORD_HASH in the environment (see
-# `make hash`) -- that's the scoring engine's own admin login, not a service
-# credential, and is deliberately kept out of this file.
+# Before `make run`, still set ADMIN_PASSWORD_HASH and BLUE_PASSWORD_HASH in
+# the environment (see `make hash`) -- the scoring engine's own admin and blue
+# team logins, not service credentials, deliberately kept out of this file.
 #
 # The ca and telnet services are script checks: their scripts live in
 # checks/ (paths are relative to the repo root, so run the engine from
@@ -27,6 +27,13 @@ round_interval_seconds: 60
 admin:
   username: admin
   password_hash: ${ADMIN_PASSWORD_HASH}
+
+# The blue team's login to the Credentials page, where they switch a check to
+# another of these accounts and set its new password.
+blue_team:
+  username: blue
+  password_hash: ${BLUE_PASSWORD_HASH}
+  allowed_users: [mrkrabs, spongebob, squidward, patrick, sandy, gary, puff, larry, mermaidman, barnacleboy, jellyfish]
 
 services:
   - name: apache
@@ -55,7 +62,6 @@ services:
       user: mrkrabs
       password: Patty321!
       share: sambashare
-      expect_share: sambashare
       expect_file: secretformula.txt
 
   - name: smtp
@@ -133,3 +139,20 @@ services:
     params:
       script: checks/telnet.exp
       env: {CHECK_USER: sandy, CHECK_PASSWORD: "Patty321!", CHECK_EXPECT_HOSTNAME: kelpdelivery}
+
+# Labels for the scoreboard's network diagram (no effect on checks).
+networks:
+  - {cidr: 10.111.1.0/24, name: Linux}
+  - {cidr: 10.111.2.0/24, name: Windows}
+
+hosts:
+  - {address: 10.111.1.1, name: shellphone, os: Ubuntu 24.04 LTS}
+  - {address: 10.111.1.2, name: pattyvault, os: Ubuntu 24.04 LTS}
+  - {address: 10.111.1.3, name: bottlemail, os: Ubuntu 24.04 LTS}
+  - {address: 10.111.1.4, name: thesafe, os: Ubuntu 24.04 LTS}
+  - {address: 10.111.1.5, name: krustyfront, os: Ubuntu 24.04 LTS}
+  - {address: 10.111.2.1, name: treedome, os: Windows Server 2019}
+  - {address: 10.111.2.2, name: goldenspatula, os: Windows Server 2019}
+  - {address: 10.111.2.3, name: orderwindow, os: Windows Server 2019}
+  - {address: 10.111.2.4, name: bubblechat, os: Windows Server 2019}
+  - {address: 10.111.2.5, name: kelpdelivery, os: Windows Server 2019}
