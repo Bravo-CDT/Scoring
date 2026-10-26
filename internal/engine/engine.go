@@ -16,6 +16,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"reflect"
 	"slices"
 	"strings"
@@ -743,8 +744,13 @@ func (e *Engine) ResetRound(backup bool) (string, error) {
 	if err != nil {
 		return path, fmt.Errorf("engine: resetting round data: %w", err)
 	}
+	// The backup still refers to the submissions, so their files go with it.
+	keepDir := ""
+	if path != "" {
+		keepDir = strings.TrimSuffix(path, filepath.Ext(path)) + "-uploads"
+	}
 	for _, name := range deleted {
-		e.removeUpload(name)
+		e.moveOrRemoveUpload(name, keepDir)
 	}
 	// The engine is stopped (checked above), so no service is enabled and
 	// no round can be recorded under the old numbering.

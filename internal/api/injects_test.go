@@ -3,8 +3,10 @@ package api
 import (
 	"fmt"
 	"io"
+	"log"
 	"mime/multipart"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -196,5 +198,52 @@ func TestScoreBreakdown_Public(t *testing.T) {
 	h.mustStatus(r, http.StatusOK, "GET /score/breakdown")
 	if got := r.object(t)["blue"].(map[string]any); got["scavenger_hunt"] != 0.0 || got["total"] != 1000.0 {
 		t.Errorf("blue = %v, want scavenger_hunt 0 and total 1000", got)
+	}
+}
+
+func TestEvents_PublicMessagesHideInjects(t *testing.T) {
+	h := newInjectsHarness(t)
+	admin := h.login()
+	h.createInject(admin, "red", true)
+
+	public := string(h.do(http.MethodGet, "/events", "", "").body)
+	if strings.Contains(public, "report") || strings.Contains(public, "red,") {
+		t.Errorf("public events show the inject: %s", public)
+	}
+	if adminView := string(h.do(http.MethodGet, "/events", admin, "").body); !strings.Contains(adminView, "report") {
+		t.Errorf("admin events lack the inject's title: %s", adminView)
+	}
+}
+
+// slowReader hands out a few bytes at a time, pausing before each.
+type slowReader struct{ left int }
+
+func (r *slowReader) Read(p []byte) (int, error) {
+	if r.left == 0 {
+		return 0, io.EOF
+	}
+	time.Sleep(50 * time.Millisecond)
+	r.left--
+	p[0] = 'x'
+	return 1, nil
+}
+
+// An upload slower than the server's ReadTimeout still goes through: the
+// upload routes give themselves longer.
+func TestInjects_SlowUploadOutlivesReadTimeout(t *testing.T) {
+	h := newInjectsHarness(t)
+	id := h.createInject(h.login(), "blue", true)
+	blueAuth := auth.New(blueUsername, testHash)
+	srv := httptest.NewUnstartedServer(newServer(h.e, h.st, h.sess.ID, auth.New(testUsername, testHash), h.configPath,
+		log.New(h.logs, "", 0), WithBlueTeam(blueAuth)))
+	srv.Config.ReadTimeout = 100 * time.Millisecond
+	srv.Start()
+	t.Cleanup(srv.Close)
+	token, _ := blueAuth.Login(blueUsername, testPassword)
+
+	slow := *h
+	slow.url = srv.URL
+	if status, body := slow.upload(http.MethodPut, fmt.Sprintf("/team/injects/%d/submission", id), token, "", &slowReader{left: 8}); status != http.StatusOK {
+		t.Errorf("slow upload = %d %s, want 200", status, body)
 	}
 }

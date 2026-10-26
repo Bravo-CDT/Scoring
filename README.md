@@ -133,7 +133,10 @@ now). Points per inject show only on the team's own injects page.
 Submissions and PDFs are kept in an `uploads/` directory next to the
 database. Backups don't include it, so copy it along with a backup if you
 need the files. "Reset for a new round" keeps the injects but closes them and
-deletes every submission and grade. Like the blue team's, the red team login
+clears every submission and grade; with its backup on, the submission files
+move into a `-uploads` directory beside the backup (e.g.
+`backups/scoring-<timestamp>-uploads/`) instead of being deleted. To restore
+that backup, move them back into `uploads/` too. Like the blue team's, the red team login
 is read at startup only.
 
 Everything the console does is also a plain HTTP API: `POST /login` with

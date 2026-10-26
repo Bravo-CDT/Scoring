@@ -125,7 +125,7 @@ func (e *Engine) Injects(team string) ([]InjectView, error) {
 	}
 	out := make([]InjectView, 0, len(ins))
 	for _, in := range ins {
-		v, err := e.view(in)
+		v, err := e.view(in, team != "")
 		if err != nil {
 			return nil, err
 		}
@@ -141,7 +141,7 @@ func (e *Engine) Inject(team string, id int64) (InjectView, error) {
 	if err != nil {
 		return InjectView{}, err
 	}
-	return e.view(in)
+	return e.view(in, team != "")
 }
 
 // CreateInject adds a closed inject, as the admin.
@@ -156,11 +156,11 @@ func (e *Engine) CreateInject(input InjectInput) (InjectView, error) {
 	if err != nil {
 		return InjectView{}, fmt.Errorf("engine: creating inject: %w", err)
 	}
-	if err := e.logEngineEvent(ActorAdmin, EventInjectCreated,
-		fmt.Sprintf("inject %d (%s) created for %s, due %s", in.ID, in.Title, in.Team, in.Deadline.Format(time.RFC3339))); err != nil {
+	if err := e.logInjectEvent(ActorAdmin, EventInjectCreated, in.ID, "created",
+		fmt.Sprintf("%s, for %s, due %s", in.Title, in.Team, in.Deadline.Format(time.RFC3339))); err != nil {
 		return InjectView{}, err
 	}
-	return e.view(in)
+	return e.view(in, false)
 }
 
 // UpdateInject changes an inject's title, deadline and whether it's open, as
@@ -187,11 +187,11 @@ func (e *Engine) UpdateInject(id int64, title string, deadline time.Time, open b
 	if open {
 		state = "open"
 	}
-	if err := e.logEngineEvent(ActorAdmin, EventInjectUpdated,
-		fmt.Sprintf("inject %d (%s) %s, due %s", in.ID, in.Title, state, in.Deadline.Format(time.RFC3339))); err != nil {
+	if err := e.logInjectEvent(ActorAdmin, EventInjectUpdated, in.ID, "updated",
+		fmt.Sprintf("%s: %s, due %s", in.Title, state, in.Deadline.Format(time.RFC3339))); err != nil {
 		return InjectView{}, err
 	}
-	return e.view(in)
+	return e.view(in, false)
 }
 
 // SetInjectPDF stores the inject's instructions, replacing any earlier PDF,
@@ -227,7 +227,7 @@ func (e *Engine) SetInjectPDF(id int64, name string, r io.Reader) error {
 	if err := e.store.UpdateInject(e.session.ID, in); err != nil {
 		return fmt.Errorf("engine: saving inject PDF: %w", err)
 	}
-	return e.logEngineEvent(ActorAdmin, EventInjectUpdated, fmt.Sprintf("inject %d (%s) instructions uploaded", in.ID, in.Title))
+	return e.logInjectEvent(ActorAdmin, EventInjectUpdated, in.ID, "updated", in.Title+": instructions uploaded")
 }
 
 // InjectPDF returns the path and original name of the inject's PDF, for team
@@ -291,10 +291,10 @@ func (e *Engine) Submit(team string, id int64, note, fileName string, r io.Reade
 	if team == TeamRed {
 		actor = ActorRedTeam
 	}
-	if err := e.logEngineEvent(actor, EventInjectSubmitted, fmt.Sprintf("inject %d (%s) submitted", in.ID, in.Title)); err != nil {
+	if err := e.logInjectEvent(actor, EventInjectSubmitted, in.ID, "submitted", in.Title); err != nil {
 		return InjectView{}, err
 	}
-	return e.view(in)
+	return e.view(in, true)
 }
 
 // SubmissionFile returns the path and original name of the inject's
@@ -337,7 +337,7 @@ func (e *Engine) GradeInject(id int64, grade int) (InjectView, error) {
 	if err := e.store.UpdateInject(e.session.ID, in); err != nil {
 		return InjectView{}, fmt.Errorf("engine: grading inject: %w", err)
 	}
-	return e.view(in)
+	return e.view(in, false)
 }
 
 // ApproveInject moves the inject's points, as the grey team: grade/10 of
@@ -370,11 +370,11 @@ func (e *Engine) ApproveInject(id int64) (InjectView, error) {
 		}
 		return InjectView{}, fmt.Errorf("engine: approving inject: %w", err)
 	}
-	if err := e.logEngineEvent(ActorAdmin, EventInjectApproved,
-		fmt.Sprintf("inject %d (%s) approved: %d/10, %d points to %s", in.ID, in.Title, grade, points, in.Team)); err != nil {
+	if err := e.logInjectEvent(ActorAdmin, EventInjectApproved, in.ID, "approved",
+		fmt.Sprintf("%s: %d/10, %d points to %s", in.Title, grade, points, in.Team)); err != nil {
 		return InjectView{}, err
 	}
-	return e.view(in)
+	return e.view(in, false)
 }
 
 // DeleteInject removes the inject, its submission and files, and takes back
@@ -402,11 +402,11 @@ func (e *Engine) DeleteInject(id int64) error {
 	if in.PDFName != "" {
 		e.removeUpload(pdfName(id))
 	}
-	msg := fmt.Sprintf("inject %d (%s) deleted", in.ID, in.Title)
+	detail := in.Title
 	if in.Points != nil {
-		msg += fmt.Sprintf(", its %d points taken back", *in.Points)
+		detail += fmt.Sprintf(": its %d points taken back", *in.Points)
 	}
-	return e.logEngineEvent(ActorAdmin, EventInjectDeleted, msg)
+	return e.logInjectEvent(ActorAdmin, EventInjectDeleted, in.ID, "deleted", detail)
 }
 
 // ScoreBreakdown splits each team's score by where its points came from.
@@ -436,11 +436,17 @@ func (e *Engine) getInject(team string, id int64) (store.Inject, error) {
 	return in, nil
 }
 
-func (e *Engine) view(in store.Inject) (InjectView, error) {
+// view is in as the admin sees it, or as its team does when forTeam is set:
+// without the grade until it's approved, since the grade is a draft until
+// then.
+func (e *Engine) view(in store.Inject, forTeam bool) (InjectView, error) {
 	v := InjectView{
 		ID: in.ID, Team: in.Team, Title: in.Title, HasPDF: in.PDFName != "",
 		Open: in.Open, Deadline: in.Deadline, Accepting: accepting(in, time.Now()),
 		Worth: e.currentLayout().injectWorth, Grade: in.Grade, Points: in.Points, ApprovedAt: in.ApprovedAt,
+	}
+	if forTeam && in.ApprovedAt == nil {
+		v.Grade = nil
 	}
 	sub, ok, err := e.store.GetSubmission(e.session.ID, in.ID)
 	if err != nil {
@@ -450,6 +456,16 @@ func (e *Engine) view(in store.Inject) (InjectView, error) {
 		v.Submission = &SubmissionView{Note: sub.Note, FileName: sub.FileName, Size: sub.Size, SubmittedAt: sub.SubmittedAt}
 	}
 	return v, nil
+}
+
+// logInjectEvent logs an inject event. Events are public, so the message
+// names the inject only by id; its title, team and grade go in the detail,
+// which only admins see.
+func (e *Engine) logInjectEvent(actor Actor, eventType string, id int64, verb, detail string) error {
+	return e.logEvent(store.Event{
+		Level: "info", Actor: string(actor), Type: eventType,
+		Message: fmt.Sprintf("inject %d %s", id, verb), Detail: detail,
+	})
 }
 
 func accepting(in store.Inject, now time.Time) bool {
@@ -495,6 +511,22 @@ func (e *Engine) upload(name string) string { return filepath.Join(e.uploadsDir,
 func (e *Engine) removeUpload(name string) {
 	if err := os.Remove(e.upload(name)); err != nil && !errors.Is(err, os.ErrNotExist) {
 		log.Printf("engine: removing upload %s: %v", name, err)
+	}
+}
+
+// moveOrRemoveUpload moves an upload into dir, or deletes it when dir is "".
+// Like removeUpload, a failure is logged rather than returned.
+func (e *Engine) moveOrRemoveUpload(name, dir string) {
+	if dir == "" {
+		e.removeUpload(name)
+		return
+	}
+	err := os.MkdirAll(dir, 0o700)
+	if err == nil {
+		err = os.Rename(e.upload(name), filepath.Join(dir, name))
+	}
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		log.Printf("engine: keeping upload %s with the backup: %v", name, err)
 	}
 }
 

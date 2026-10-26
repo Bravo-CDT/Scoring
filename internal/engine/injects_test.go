@@ -293,3 +293,33 @@ func TestTeamEnabled(t *testing.T) {
 		t.Error("red off with EnableRedTeamLogin and a red_team section")
 	}
 }
+
+func TestInject_TeamDoesNotSeeDraftGrade(t *testing.T) {
+	h := newInjectsHarness(t, "")
+	in := h.gradedInject(t, TeamBlue, 4)
+	if got, err := h.e.Inject(TeamBlue, in.ID); err != nil || got.Grade != nil {
+		t.Fatalf("team view before approval = %+v, %v; want no grade", got.Grade, err)
+	}
+	if got, _ := h.e.Inject("", in.ID); got.Grade == nil {
+		t.Error("admin view lost the grade")
+	}
+	if _, err := h.e.ApproveInject(in.ID); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := h.e.Inject(TeamBlue, in.ID); got.Grade == nil || *got.Grade != 4 {
+		t.Errorf("team view after approval grade = %v, want 4", got.Grade)
+	}
+}
+
+func TestResetRound_BackupKeepsSubmissionFiles(t *testing.T) {
+	h := newInjectsHarness(t, "")
+	h.gradedInject(t, TeamBlue, 5)
+	path, err := h.e.ResetRound(true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	kept, err := os.ReadDir(strings.TrimSuffix(path, ".db") + "-uploads")
+	if err != nil || len(kept) != 1 {
+		t.Errorf("backup uploads = %v, %v; want the one submission", kept, err)
+	}
+}

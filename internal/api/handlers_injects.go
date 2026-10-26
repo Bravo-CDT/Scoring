@@ -25,6 +25,21 @@ func WithRedTeam(a *auth.Auth) Option {
 // and the multipart framing.
 const maxUploadBody = engine.MaxUploadBytes + 1<<20
 
+// transferTimeout replaces the server's read and write timeouts, which are
+// sized for small JSON bodies, on the routes that move whole files: 50 MB
+// over a slow link takes minutes.
+const transferTimeout = 10 * time.Minute
+
+// allowSlowTransfer gives this request transferTimeout to read its body and
+// write its response. Errors are ignored: a writer that can't set deadlines
+// (a test recorder) has none to extend.
+func allowSlowTransfer(w http.ResponseWriter) {
+	rc := http.NewResponseController(w)
+	deadline := time.Now().Add(transferTimeout)
+	_ = rc.SetReadDeadline(deadline)
+	_ = rc.SetWriteDeadline(deadline)
+}
+
 // routeInjects registers the injects routes and the public score breakdown.
 func (s *server) routeInjects(a *auth.Auth) {
 	s.mux.HandleFunc("POST /team/login", s.handleTeamLogin)
@@ -140,6 +155,7 @@ func (s *server) teamFile(find func(team string, id int64) (string, string, erro
 			s.injectError(w, r, err)
 			return
 		}
+		allowSlowTransfer(w)
 		w.Header().Set("Content-Type", contentType)
 		w.Header().Set("Content-Disposition", "attachment; filename*=UTF-8''"+url.PathEscape(name))
 		w.Header().Set("X-Content-Type-Options", "nosniff")
@@ -209,6 +225,7 @@ var (
 // readUpload streams a multipart body, handing each part before "file" to
 // field and then "file" itself to file, which must be the last part.
 func readUpload(w http.ResponseWriter, r *http.Request, field func(*multipart.Part) error, file func(name string, r io.Reader) error) error {
+	allowSlowTransfer(w)
 	r.Body = http.MaxBytesReader(w, r.Body, maxUploadBody)
 	mr, err := r.MultipartReader()
 	if err != nil {
