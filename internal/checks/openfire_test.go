@@ -128,3 +128,11 @@ func TestOpenfire_NoCSRFCookie(t *testing.T) {
 		t.Errorf("Detail %q should mention \"csrf\"", res.Detail)
 	}
 }
+
+func TestOpenfire_RedirectWithoutLocation(t *testing.T) {
+	host, port := fakeOpenfire(t, true, redirectTo(""), loginPage)
+	res := Openfire(context.Background(), host, validOpenfireParams(port, "Patty321!"))
+	if res.Success {
+		t.Fatalf("expected failure, got %+v", res)
+	}
+}
