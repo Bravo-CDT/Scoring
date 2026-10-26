@@ -634,3 +634,42 @@ func TestLoadForChecks_ToleratesUnsetBlueHash(t *testing.T) {
 		t.Fatalf("LoadForChecks: %v", err)
 	}
 }
+
+func TestValidate_RedTeam(t *testing.T) {
+	setHash(t)
+	for _, tc := range []struct {
+		name, section, wantErr string
+	}{
+		{"valid", "red_team:\n  username: red\n  password_hash: ${TEST_ADMIN_HASH}\n", ""},
+		{"no username", "red_team:\n  password_hash: ${TEST_ADMIN_HASH}\n", "red_team.username"},
+		{"bad hash", "red_team:\n  username: red\n  password_hash: nope\n", "red_team.password_hash"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg, err := Load(writeTemp(t, minimalYAML+tc.section))
+			if tc.wantErr == "" {
+				if err != nil || cfg.RedTeam == nil || cfg.RedTeam.Username != "red" {
+					t.Fatalf("Load = %+v, %v; want red_team red", cfg, err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Errorf("err = %v, want it to mention %s", err, tc.wantErr)
+			}
+		})
+	}
+}
+
+func TestInjectWorth(t *testing.T) {
+	setHash(t)
+	cfg, err := Load(writeTemp(t, minimalYAML))
+	if err != nil || cfg.InjectWorth() != DefaultInjectPoints || DefaultInjectPoints != 30000 {
+		t.Errorf("absent inject_points: worth = %v (err %v), want 30000", cfg, err)
+	}
+	cfg, err = Load(writeTemp(t, minimalYAML+"inject_points: 25000\n"))
+	if err != nil || cfg.InjectWorth() != 25000 {
+		t.Errorf("inject_points 25000: err %v", err)
+	}
+	if _, err := Load(writeTemp(t, minimalYAML+"inject_points: -1\n")); err == nil || !strings.Contains(err.Error(), "inject_points") {
+		t.Errorf("inject_points -1: err = %v, want it to mention inject_points", err)
+	}
+}

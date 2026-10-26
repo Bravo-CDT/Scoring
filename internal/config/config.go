@@ -67,6 +67,17 @@ type BlueTeamConfig struct {
 	AllowedUsers []string `yaml:"allowed_users"`
 }
 
+// RedTeamConfig is the red team's login to the injects page. Like the
+// admin's, it is read at startup only.
+type RedTeamConfig struct {
+	Username     string `yaml:"username"`
+	PasswordHash string `yaml:"password_hash"`
+}
+
+// DefaultInjectPoints is what an inject graded 10/10 is worth when the config
+// leaves inject_points out.
+const DefaultInjectPoints = 30000
+
 // NetworkConfig names a subnet on the scoreboard's network diagram. It has
 // no effect on checks.
 type NetworkConfig struct {
@@ -101,6 +112,20 @@ type Config struct {
 	// BlueTeam turns on the blue team credentials page; nil when the section
 	// is absent, which leaves the feature off.
 	BlueTeam *BlueTeamConfig `yaml:"blue_team"`
+	// RedTeam turns on the red team's login to the injects page; nil when the
+	// section is absent.
+	RedTeam *RedTeamConfig `yaml:"red_team"`
+	// InjectPoints is what an inject graded 10/10 is worth; 0 means
+	// DefaultInjectPoints. Applied on /reload to injects not yet approved.
+	InjectPoints int `yaml:"inject_points"`
+}
+
+// InjectWorth is what an inject graded 10/10 is worth.
+func (c *Config) InjectWorth() int {
+	if c.InjectPoints == 0 {
+		return DefaultInjectPoints
+	}
+	return c.InjectPoints
 }
 
 // Hash returns the sha256 hex digest of raw config file bytes, used to
@@ -238,7 +263,29 @@ func validate(cfg *Config, withAdmin bool) error {
 			return err
 		}
 	}
+	if cfg.RedTeam != nil {
+		if err := validateRedTeam(cfg.RedTeam, withAdmin); err != nil {
+			return err
+		}
+	}
+	if cfg.InjectPoints < 0 {
+		return fmt.Errorf("inject_points must not be negative, got %d", cfg.InjectPoints)
+	}
 	return validateLayout(cfg.Networks, cfg.Hosts)
+}
+
+// validateRedTeam checks the red_team section, its password hash only if
+// withHash is set, as validateBlueTeam does.
+func validateRedTeam(rt *RedTeamConfig, withHash bool) error {
+	if rt.Username == "" {
+		return errors.New("red_team.username is required")
+	}
+	if withHash {
+		if _, err := bcrypt.Cost([]byte(rt.PasswordHash)); err != nil {
+			return fmt.Errorf("red_team.password_hash is not a valid bcrypt hash: %w", err)
+		}
+	}
+	return nil
 }
 
 // validateBlueTeam checks the blue_team section, its password hash only if
