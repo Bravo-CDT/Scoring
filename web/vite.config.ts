@@ -11,7 +11,7 @@ const apiURL = process.env.API_URL ?? 'http://127.0.0.1:8080';
 // production the Go binary serves both the API and this frontend from one
 // origin; in development these are proxied so the frontend can use the same
 // relative URLs.
-const apiPaths = ['/status', '/events', '/services', '/login', '/engine', '/scoring', '/countdown', '/reload'];
+const apiPaths = ['/status', '/events', '/services', '/login', '/engine', '/scoring', '/countdown', '/reload', '/blue'];
 
 // https://vite.dev/config/
 export default defineConfig({

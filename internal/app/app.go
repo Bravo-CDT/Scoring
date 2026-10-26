@@ -168,6 +168,10 @@ func build(opts Options, cfg *config.Config, st *store.Store) (*App, error) {
 	if opts.WebDir != "" {
 		apiOpts = append(apiOpts, api.WithFallback(NewStaticHandler(opts.WebDir)))
 	}
+	// Like the admin's, the blue team login is read at startup only.
+	if cfg.BlueTeam != nil {
+		apiOpts = append(apiOpts, api.WithBlueTeam(auth.New(cfg.BlueTeam.Username, cfg.BlueTeam.PasswordHash)))
+	}
 	// Started last, so no error path above leaves it running.
 	ctx, cancel := context.WithCancel(context.Background())
 	roundsDone := sched.Run(ctx, firstRound)
