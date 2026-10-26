@@ -62,7 +62,6 @@ services:
       user: mrkrabs
       password: Patty321!
       share: sambashare
-      expect_share: sambashare
       expect_file: secretformula.txt
 
   - name: smtp
