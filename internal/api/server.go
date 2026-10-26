@@ -44,7 +44,9 @@ type server struct {
 	sessionID int64
 	auth      *auth.Auth
 	// blueAuth is the blue team's login; nil while the feature is off.
-	blueAuth   *auth.Auth
+	blueAuth *auth.Auth
+	// redAuth is the red team's login to the injects routes; nil without one.
+	redAuth    *auth.Auth
 	configPath string
 	logger     *log.Logger
 	mux        *http.ServeMux
@@ -118,6 +120,7 @@ func newServer(e *engine.Engine, st *store.Store, sessionID int64, a *auth.Auth,
 	admin("POST /db/reset-round", s.handleResetRound)
 
 	s.routeBlueTeam()
+	s.routeInjects(a)
 
 	return s
 }

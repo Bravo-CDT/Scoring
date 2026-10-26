@@ -5,6 +5,7 @@
 /config.yaml
 /scoring.db
 /backups/
+/uploads/
 *.db-wal
 *.db-shm
 temp_*

@@ -117,6 +117,8 @@ func build(opts Options, cfg *config.Config, st *store.Store) (*App, error) {
 	sc := scorer.New(st, sess.ID)
 	sched := scheduler.New(registry, sc, opts.ConfigPath, time.Duration(cfg.RoundIntervalSeconds)*time.Second)
 	eng := engine.New(st, sess, sched, opts.ConfigPath)
+	// Inject submissions and PDFs live beside the database, like backups.
+	eng.SetUploadsDir(filepath.Join(filepath.Dir(opts.DBPath), "uploads"))
 	// Each round checks with the blue team's credential changes, read fresh
 	// from the database, so a change or reset applies from the next round.
 	sched.SetCredentialSource(eng.CredentialOverrides)
@@ -158,10 +160,14 @@ func build(opts Options, cfg *config.Config, st *store.Store) (*App, error) {
 	if opts.WebDir != "" {
 		apiOpts = append(apiOpts, api.WithFallback(NewStaticHandler(opts.WebDir)))
 	}
-	// Like the admin's, the blue team login is read at startup only.
+	// Like the admin's, the team logins are read at startup only.
 	if cfg.BlueTeam != nil {
 		apiOpts = append(apiOpts, api.WithBlueTeam(auth.New(cfg.BlueTeam.Username, cfg.BlueTeam.PasswordHash)))
 		eng.EnableBlueTeamLogin()
+	}
+	if cfg.RedTeam != nil {
+		apiOpts = append(apiOpts, api.WithRedTeam(auth.New(cfg.RedTeam.Username, cfg.RedTeam.PasswordHash)))
+		eng.EnableRedTeamLogin()
 	}
 	// Started last, so no error path above leaves it running.
 	ctx, cancel := context.WithCancel(context.Background())

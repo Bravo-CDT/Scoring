@@ -10,8 +10,9 @@ const apiURL = process.env.API_URL ?? 'http://127.0.0.1:8080';
 // Every top-level path the Go API serves (see internal/api/server.go). In
 // production the Go binary serves both the API and this frontend from one
 // origin; in development these are proxied so the frontend can use the same
-// relative URLs.
-const apiPaths = ['/status', '/events', '/services', '/login', '/engine', '/scoring', '/countdown', '/reload', '/blue'];
+// relative URLs. Only /admin/injects of /admin is the API's: /admin itself is the
+// admin console's page.
+const apiPaths = ['/status', '/events', '/services', '/login', '/engine', '/scoring', '/countdown', '/reload', '/blue', '/team', '/score', '/admin/injects'];
 
 // https://vite.dev/config/
 export default defineConfig({
