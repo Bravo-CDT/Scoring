@@ -33,6 +33,8 @@
   border-top: 4px solid var(--team-colour);
   background: var(--mantine-color-dark-6);
   text-align: center;
+  /* A button: it opens the team's score breakdown. */
+  cursor: pointer;
 }
 
 .team[data-team='blue'] {

@@ -1,7 +1,8 @@
-import { Alert, Badge, Anchor, Center, Group, Loader, Stack, Text, Title } from '@mantine/core';
+import { Alert, Badge, Anchor, Center, Group, Loader, Stack, Text, Title, UnstyledButton } from '@mantine/core';
 import { useEffect, useState } from 'react';
 import type { Status } from '../api/client';
 import { NetworkDiagram } from './NetworkDiagram';
+import { ScoreBreakdown } from './ScoreBreakdown';
 import classes from './Scoreboard.module.css';
 import { ServiceHistory } from './ServiceHistory';
 import { useStatusPolling } from './useStatusPolling';
@@ -11,6 +12,8 @@ export function Scoreboard() {
   const { status, error, serverClockOffsetMs } = useStatusPolling();
   // The service whose history is open, if any.
   const [historyOf, setHistoryOf] = useState<string | null>(null);
+  // The team whose score breakdown is open, if any.
+  const [breakdownOf, setBreakdownOf] = useState<'blue' | 'red' | null>(null);
 
   if (status === null) {
     return (
@@ -36,8 +39,8 @@ export function Scoreboard() {
         </Stack>
 
         <div className={classes.scores}>
-          <TeamScore team="Blue" color="blue" score={status.blue_score} />
-          <TeamScore team="Red" color="red" score={status.red_score} />
+          <TeamScore team="Blue" color="blue" score={status.blue_score} onOpen={() => setBreakdownOf('blue')} />
+          <TeamScore team="Red" color="red" score={status.red_score} onOpen={() => setBreakdownOf('red')} />
         </div>
 
         <div className={classes.clocks}>
@@ -75,6 +78,14 @@ export function Scoreboard() {
       </Group>
 
       {historyOf !== null && <ServiceHistory key={historyOf} name={historyOf} onClose={() => setHistoryOf(null)} />}
+      {breakdownOf !== null && (
+        <ScoreBreakdown
+          key={breakdownOf}
+          team={breakdownOf}
+          label={breakdownOf === 'blue' ? 'Blue' : 'Red'}
+          onClose={() => setBreakdownOf(null)}
+        />
+      )}
     </div>
   );
 }
@@ -100,14 +111,15 @@ function Freshness({ status }: { status: Status }) {
   );
 }
 
-function TeamScore({ team, color, score }: { team: string; color: string; score: number }) {
+/** A team's score; clicking it opens the breakdown of where the points came from. */
+function TeamScore({ team, color, score, onOpen }: { team: string; color: string; score: number; onOpen: () => void }) {
   return (
-    <div className={classes.team} data-team={color}>
+    <UnstyledButton className={classes.team} data-team={color} onClick={onOpen}>
       <Text c={color} fw={800} tt="uppercase" fz="sm" lts={2}>
         {team}
       </Text>
       <Text className={classes.score}>{score.toLocaleString()}</Text>
-    </div>
+    </UnstyledButton>
   );
 }
 
