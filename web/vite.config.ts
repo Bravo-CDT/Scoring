@@ -23,5 +23,8 @@ export default defineConfig({
     // Component tests render into a DOM; jsdom provides one.
     environment: 'jsdom',
     setupFiles: ['./src/test/setup.ts'],
+    // The admin console's user-event tests take 4-5s each on a small box,
+    // past the 5s default.
+    testTimeout: 20_000,
   },
 });

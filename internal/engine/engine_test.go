@@ -821,8 +821,12 @@ func TestResetRound_RestartsRoundNumbering(t *testing.T) {
 		t.Fatalf("Round after reset = %d, want 0", got)
 	}
 	h.start(t)
-	waitFor(t, "a round after the reset", func() bool { return h.status(t).Round >= 1 })
-	if got := h.status(t).Round; got != 1 {
+	waitFor(t, "a check after the reset", func() bool { return h.countResults(t, "svc1") > 0 })
+	mustDo(t, "Stop", h.e.Stop())
+	// Rounds are 20ms, so read the recorded results, not the live round.
+	rs, err := h.st.ListCheckResults(h.service(t, "svc1").ID, 1000, 0)
+	mustDo(t, "ListCheckResults", err)
+	if got := rs[len(rs)-1].Round; got != 1 {
 		t.Errorf("first round after reset = %d, want 1", got)
 	}
 }
