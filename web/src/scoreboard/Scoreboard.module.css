@@ -67,7 +67,7 @@
   line-height: 1.1;
 }
 
-.admin {
+.links {
   position: absolute;
   right: var(--mantine-spacing-xl);
   bottom: var(--mantine-spacing-md);

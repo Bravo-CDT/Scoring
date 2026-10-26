@@ -50,6 +50,7 @@ describe('getStatus', () => {
       ],
       networks: [],
       hosts: [],
+      credentials_enabled: false,
     };
     const fetchMock = stubFetch({ ok: true, status: 200, json: async () => body });
 

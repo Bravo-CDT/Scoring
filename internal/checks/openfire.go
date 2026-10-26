@@ -105,7 +105,11 @@ func Openfire(ctx context.Context, host string, params map[string]any) Result {
 	if resp.StatusCode != http.StatusFound {
 		return fail("login as %q: status %d, want 302", p.user, resp.StatusCode)
 	}
-	if strings.Contains(resp.Header.Get("Location"), "login.jsp") {
+	loc := resp.Header.Get("Location")
+	if loc == "" {
+		return fail("login as %q: 302 without a Location", p.user)
+	}
+	if strings.Contains(loc, "login.jsp") {
 		return fail("login as %q: redirected back to login.jsp", p.user)
 	}
 	return Result{Success: true, Detail: "logged in as " + strconv.Quote(p.user)}

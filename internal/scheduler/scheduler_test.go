@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
 	"slices"
@@ -920,5 +921,68 @@ func TestStartRoundNow_RunsARoundImmediatelyAndRetimesTheClock(t *testing.T) {
 	_, next := s.RoundStatus()
 	if next.Before(kicked.Add(time.Hour)) {
 		t.Errorf("next round at %v, want an hour after the immediate round (after %v)", next, kicked.Add(time.Hour))
+	}
+}
+
+// postgresYAML is a postgres-typed service entry, a type with a credential.
+const postgresYAML = `
+  - name: db
+    host: db
+    check_type: postgres
+    points_per_failure: 10
+    params: {port: 5432, user: mrkrabs, password: pw1, dbname: d}
+`
+
+// recordingRegistry registers a postgres check that sends the params it was
+// called with on the returned channel.
+func recordingRegistry() (*checks.Registry, chan map[string]any) {
+	seen := make(chan map[string]any, 100)
+	r := checks.NewRegistry()
+	r.Register("postgres", func(_ context.Context, _ string, params map[string]any) checks.Result {
+		seen <- params
+		return checks.Result{Success: true}
+	})
+	return r, seen
+}
+
+func TestRound_UsesCredentialOverride(t *testing.T) {
+	registry, seen := recordingRegistry()
+	var mu sync.Mutex
+	overrides := map[string]checks.Credential{"db": {Username: "patrick", Password: "pw2"}}
+	s := newScheduler(t, registry, &fakeSink{}, newConfigWith(t, postgresYAML), testRound)
+	s.SetCredentialSource(func() (map[string]checks.Credential, error) {
+		mu.Lock()
+		defer mu.Unlock()
+		return maps.Clone(overrides), nil
+	})
+	mustStart(t, s, 1, "db")
+	run(t, s)
+
+	if p := receive(t, "a check", seen); p["user"] != "patrick" || p["password"] != "pw2" {
+		t.Errorf("params with an override = %v, want user patrick, password pw2", p)
+	}
+
+	mu.Lock()
+	clear(overrides)
+	mu.Unlock()
+	// A round already under way may still have the override; within a couple
+	// more the config's credentials are back.
+	waitFor(t, "a check on the config's credentials", func() bool {
+		p := receive(t, "a check", seen)
+		return p["user"] == "mrkrabs" && p["password"] == "pw1"
+	})
+}
+
+func TestRound_CredentialSourceErrorRunsOnDefaults(t *testing.T) {
+	registry, seen := recordingRegistry()
+	s := newScheduler(t, registry, &fakeSink{}, newConfigWith(t, postgresYAML), testRound)
+	s.SetCredentialSource(func() (map[string]checks.Credential, error) {
+		return nil, errors.New("database is locked")
+	})
+	mustStart(t, s, 1, "db")
+	run(t, s)
+
+	if p := receive(t, "a check", seen); p["user"] != "mrkrabs" || p["password"] != "pw1" {
+		t.Errorf("params when the source fails = %v, want the config's", p)
 	}
 }

@@ -17,6 +17,7 @@ help:
 	@echo "  make run                   build, then run against CONFIG=$(CONFIG) DB=$(DB) ADDR=$(ADDR)"
 	@echo "                             (needs ADMIN_PASSWORD_HASH set in the environment)"
 	@echo "  make hash PASSWORD=x       print a bcrypt hash of x for ADMIN_PASSWORD_HASH"
+	@echo "                             (or BLUE_PASSWORD_HASH, the blue team's login)"
 	@echo
 	@echo "Checking services:"
 	@echo "  make check                 run every check in CONFIG once and print the results"

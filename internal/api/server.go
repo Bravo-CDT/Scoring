@@ -39,10 +39,12 @@ const (
 
 // server holds the API's dependencies; its methods are the handlers.
 type server struct {
-	engine     *engine.Engine
-	store      *store.Store
-	sessionID  int64
-	auth       *auth.Auth
+	engine    *engine.Engine
+	store     *store.Store
+	sessionID int64
+	auth      *auth.Auth
+	// blueAuth is the blue team's login; nil while the feature is off.
+	blueAuth   *auth.Auth
 	configPath string
 	logger     *log.Logger
 	mux        *http.ServeMux
@@ -114,6 +116,8 @@ func newServer(e *engine.Engine, st *store.Store, sessionID int64, a *auth.Auth,
 	admin("POST /teams/{side}/adjust", s.handleAdjustScore)
 	admin("POST /backup", s.handleBackup)
 	admin("POST /db/reset-round", s.handleResetRound)
+
+	s.routeBlueTeam()
 
 	return s
 }

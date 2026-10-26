@@ -109,6 +109,12 @@ const testRound = 20 * time.Millisecond
 // serves the API over a real HTTP server.
 func newHarness(t *testing.T, check checks.CheckFunc, services ...string) *harness {
 	t.Helper()
+	return newHarnessWithOptions(t, check, nil, services...)
+}
+
+// newHarnessWithOptions is newHarness with the API built with opts.
+func newHarnessWithOptions(t *testing.T, check checks.CheckFunc, opts []Option, services ...string) *harness {
+	t.Helper()
 	dir := t.TempDir()
 	h := &harness{t: t, configPath: filepath.Join(dir, "config.yaml"), logs: &syncBuffer{}}
 	h.writeConfig(configYAML(services...))
@@ -142,7 +148,7 @@ func newHarness(t *testing.T, check checks.CheckFunc, services ...string) *harne
 	t.Cleanup(func() { cancel(); <-done })
 
 	a := auth.New(testUsername, testHash)
-	srv := httptest.NewServer(newServer(h.e, st, h.sess.ID, a, h.configPath, log.New(h.logs, "", 0)))
+	srv := httptest.NewServer(newServer(h.e, st, h.sess.ID, a, h.configPath, log.New(h.logs, "", 0), opts...))
 	t.Cleanup(srv.Close)
 	h.url = srv.URL
 	return h
@@ -281,7 +287,7 @@ func TestStatus_DocumentedFields(t *testing.T) {
 
 	out := r.object(t)
 	// countdown_target is omitted until an admin sets one.
-	wantTop := []string{"blue_score", "engine_state", "hosts", "networks", "next_round_at", "red_score", "round",
+	wantTop := []string{"blue_score", "credentials_enabled", "engine_state", "hosts", "networks", "next_round_at", "red_score", "round",
 		"scoring_paused", "server_time", "services", "session_name", "starting_score"}
 	if got := keys(out); !slices.Equal(got, wantTop) {
 		t.Errorf("status keys = %v, want %v", got, wantTop)
@@ -1397,4 +1403,102 @@ func TestFallback_ServesUnmatchedGETsOnly(t *testing.T) {
 			}
 		})
 	}
+}
+
+// blueUsername is the blue team's login in the credentials tests; the
+// password is testPassword, as for the admin.
+const blueUsername = "blue"
+
+// newCredentialsHarness serves the API with the blue team login on, over a
+// config with one credentialed service, db.
+func newCredentialsHarness(t *testing.T) *harness {
+	t.Helper()
+	h := newHarnessWithOptions(t, okCheck, []Option{WithBlueTeam(auth.New(blueUsername, testHash))}, "db")
+	h.writeConfig(fmt.Sprintf(`
+session_name: "comp-1"
+starting_score: 1000
+round_interval_seconds: 1
+admin:
+  username: %s
+  password_hash: %q
+services:
+  - name: db
+    host: 127.0.0.1
+    check_type: postgres
+    points_per_failure: 10
+    params: {port: 5432, user: mrkrabs, password: pw1, dbname: d}
+blue_team:
+  username: %s
+  password_hash: %q
+  allowed_users: [mrkrabs, patrick]
+`, testUsername, testHash, blueUsername, testHash))
+	if _, err := h.e.Reload(""); err != nil {
+		t.Fatalf("Reload: %v", err)
+	}
+	h.e.EnableBlueTeamLogin()
+	return h
+}
+
+func (h *harness) blueLogin() string {
+	h.t.Helper()
+	r := h.do(http.MethodPost, "/blue/login", "",
+		fmt.Sprintf(`{"username":%q,"password":%q}`, blueUsername, testPassword))
+	h.mustStatus(r, http.StatusOK, "blue login")
+	token, _ := r.object(h.t)["token"].(string)
+	if token == "" {
+		h.t.Fatal("blue login returned an empty token")
+	}
+	return token
+}
+
+func TestBlueCredentials_ChangeAndReset(t *testing.T) {
+	h := newCredentialsHarness(t)
+	blue := h.blueLogin()
+	admin := h.login()
+
+	r := h.do(http.MethodPost, "/blue/login", "", fmt.Sprintf(`{"username":%q,"password":%q}`, testUsername, testPassword))
+	h.mustStatus(r, http.StatusUnauthorized, "admin credentials at /blue/login")
+	h.mustStatus(h.do(http.MethodGet, "/blue/credentials", "", ""), http.StatusUnauthorized, "GET credentials without a token")
+	h.mustStatus(h.do(http.MethodGet, "/blue/credentials", admin, ""), http.StatusOK, "GET credentials as admin")
+
+	list := h.do(http.MethodGet, "/blue/credentials", blue, "")
+	h.mustStatus(list, http.StatusOK, "GET credentials as blue")
+	if entries, _ := list.object(t)["credentials"].([]any); len(entries) != 1 {
+		t.Fatalf("credentials = %s, want one entry", list.body)
+	}
+
+	body := `{"username":"patrick","password":"pw2"}`
+	h.mustStatus(h.do(http.MethodPut, "/blue/credentials/db", admin, body), http.StatusUnauthorized, "PUT as admin")
+	h.mustStatus(h.do(http.MethodPut, "/blue/credentials/db", blue, `{"username":"jellyfish","password":"pw2"}`),
+		http.StatusBadRequest, "PUT a user not allowed")
+	put := h.do(http.MethodPut, "/blue/credentials/db", blue, body)
+	h.mustStatus(put, http.StatusOK, "PUT as blue")
+	if got := put.object(t); got["username"] != "patrick" || got["changed_at"] == nil {
+		t.Errorf("PUT answer = %s, want patrick with changed_at", put.body)
+	}
+	h.mustStatus(h.do(http.MethodPut, "/blue/credentials/nope", blue, body), http.StatusNotFound, "PUT an unknown service")
+
+	h.mustStatus(h.do(http.MethodPost, "/blue/credentials/db/reset", blue, ""), http.StatusUnauthorized, "reset as blue")
+	reset := h.do(http.MethodPost, "/blue/credentials/db/reset", admin, "")
+	h.mustStatus(reset, http.StatusOK, "reset as admin")
+	if got := reset.object(t); got["username"] != "mrkrabs" || got["changed_at"] != nil {
+		t.Errorf("reset answer = %s, want the default mrkrabs", reset.body)
+	}
+}
+
+func TestBlueCredentials_OffWithoutBlueTeam(t *testing.T) {
+	h := newHarness(t, okCheck, "svc1")
+	r := h.do(http.MethodPost, "/blue/login", "", fmt.Sprintf(`{"username":%q,"password":%q}`, blueUsername, testPassword))
+	h.mustStatus(r, http.StatusNotFound, "blue login with the feature off")
+}
+
+// Removing blue_team and reloading turns the routes off, login and all.
+func TestBlueCredentials_OffAfterBlueTeamRemoved(t *testing.T) {
+	h := newCredentialsHarness(t)
+	h.writeConfig(configYAML("db"))
+	if _, err := h.e.Reload(""); err != nil {
+		t.Fatalf("Reload: %v", err)
+	}
+	r := h.do(http.MethodPost, "/blue/login", "", fmt.Sprintf(`{"username":%q,"password":%q}`, blueUsername, testPassword))
+	h.mustStatus(r, http.StatusNotFound, "blue login after blue_team was removed")
 }
