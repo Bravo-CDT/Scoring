@@ -75,24 +75,29 @@ export function serviceLogo(name: string, checkType: string): Logo {
   return byServiceName.find(([re]) => re.test(lower))?.[1] ?? byCheckType[checkType] ?? mono(network);
 }
 
-const byOS: Record<string, { logo: Logo; label: string }> = {
-  windows: { logo: brand(windows), label: 'Windows' },
-  linux: { logo: mono(linux), label: 'Linux' },
-  ubuntu: { logo: brand(ubuntu), label: 'Ubuntu' },
-  debian: { logo: brand(debian), label: 'Debian' },
-  centos: { logo: brand(centos), label: 'CentOS' },
-  rocky: { logo: brand(rockylinux), label: 'Rocky Linux' },
-  fedora: { logo: brand(fedora), label: 'Fedora' },
-};
+/** OS logos by a word in the host's configured OS, distros before plain Linux. */
+const byOS: [string, Logo, string][] = [
+  ['windows', brand(windows), 'Windows'],
+  ['ubuntu', brand(ubuntu), 'Ubuntu'],
+  ['debian', brand(debian), 'Debian'],
+  ['centos', brand(centos), 'CentOS'],
+  ['rocky', brand(rockylinux), 'Rocky Linux'],
+  ['fedora', brand(fedora), 'Fedora'],
+  ['linux', mono(linux), 'Linux'],
+];
 
-/** The logo for a host's configured OS; a generic server when it has none we know. */
+/** The logo for a host's configured OS, e.g. "Ubuntu 24.04 LTS"; a generic server when we know none. */
 export function osLogo(os: string | undefined): Logo {
-  return byOS[os?.toLowerCase() ?? '']?.logo ?? mono(server);
+  const lower = os?.toLowerCase() ?? '';
+  return byOS.find(([word]) => lower.includes(word))?.[1] ?? mono(server);
 }
 
-/** How to write a host's configured OS: properly capitalised if we know it, else as configured. */
+/**
+ * How to write a host's configured OS: as configured, except that a bare
+ * name like "linux" is capitalised properly.
+ */
 export function osLabel(os: string | undefined): string | undefined {
-  return byOS[os?.toLowerCase() ?? '']?.label ?? os;
+  return byOS.find(([word]) => word === os?.toLowerCase())?.[2] ?? os;
 }
 
 export const engineLogo = mono(radar);
