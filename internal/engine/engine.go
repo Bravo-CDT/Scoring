@@ -713,7 +713,7 @@ func (e *Engine) ResetRound(backup bool) (string, error) {
 		return "", ErrEngineRunning
 	}
 
-	if err := e.store.ResetRoundData(e.session.ID); err != nil {
+	if _, err := e.store.ResetRoundData(e.session.ID); err != nil {
 		return path, fmt.Errorf("engine: resetting round data: %w", err)
 	}
 	// The engine is stopped (checked above), so no service is enabled and

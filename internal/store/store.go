@@ -146,6 +146,35 @@ CREATE TABLE IF NOT EXISTS credential_overrides (
 	PRIMARY KEY (session_id, service)
 );
 
+-- Injects: written tasks for one team, graded out of 10 by the grey team.
+-- grade is set while grading; points and approved_at once approved, which
+-- also records the inject's ledger entry (source type "inject", ref = id).
+CREATE TABLE IF NOT EXISTS injects (
+	id          INTEGER PRIMARY KEY AUTOINCREMENT,
+	session_id  INTEGER NOT NULL REFERENCES sessions(id),
+	team        TEXT NOT NULL,
+	title       TEXT NOT NULL,
+	pdf_name    TEXT NOT NULL DEFAULT '',
+	open        INTEGER NOT NULL DEFAULT 0,
+	deadline    INTEGER NOT NULL,
+	created_at  INTEGER NOT NULL,
+	grade       INTEGER,
+	points      INTEGER,
+	approved_at INTEGER
+);
+
+-- The team's latest submission for an inject; the file itself is on disk
+-- under stored_name.
+CREATE TABLE IF NOT EXISTS inject_submissions (
+	inject_id    INTEGER PRIMARY KEY REFERENCES injects(id),
+	session_id   INTEGER NOT NULL REFERENCES sessions(id),
+	note         TEXT NOT NULL,
+	file_name    TEXT NOT NULL,
+	stored_name  TEXT NOT NULL,
+	size         INTEGER NOT NULL,
+	submitted_at INTEGER NOT NULL
+);
+
 -- Singleton counter backing AdjustScore's ledger source_ref, so every manual
 -- adjustment gets a distinct, monotonically increasing reference.
 CREATE TABLE IF NOT EXISTS manual_adjustment_seq (

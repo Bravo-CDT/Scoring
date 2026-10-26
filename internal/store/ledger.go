@@ -30,6 +30,15 @@ const (
 // independent correction, never a transfer between teams.
 const SideManual = "manual"
 
+// Ledger source types the store itself knows about. The scorer records
+// SourceServiceCheck (it has its own copy of the name); AdjustScore records
+// SourceManualAdjustment and ApproveInject SourceInject.
+const (
+	SourceServiceCheck     = "service_check"
+	SourceManualAdjustment = "manual_adjustment"
+	SourceInject           = "inject"
+)
+
 // LedgerEntry is one point transfer between sides. The ledger is append-only
 // and is the only record of score: a side's balance is always derived by
 // summing its non-voided entries, never stored.
@@ -84,6 +93,19 @@ func (s *Store) RecordLedgerEntry(sessionID int64, sourceType string, sourceRef 
 	// Rollback after a successful Commit is a harmless no-op (sql.ErrTxDone).
 	defer tx.Rollback()
 
+	entry, err := recordLedgerEntryTx(tx, sessionID, sourceType, sourceRef, fromSide, toSide, nominalPoints, reason)
+	if err != nil {
+		return LedgerEntry{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return LedgerEntry{}, fmt.Errorf("store: committing ledger entry for %s %d: %w", sourceType, sourceRef, err)
+	}
+	return entry, nil
+}
+
+// recordLedgerEntryTx is RecordLedgerEntry inside the caller's transaction, so
+// a ledger entry can be written together with the row that caused it.
+func recordLedgerEntryTx(tx *sql.Tx, sessionID int64, sourceType string, sourceRef int64, fromSide, toSide string, nominalPoints int, reason string) (LedgerEntry, error) {
 	startingScore, err := sessionStartingScore(tx, sessionID)
 	if err != nil {
 		return LedgerEntry{}, err
@@ -112,9 +134,6 @@ func (s *Store) RecordLedgerEntry(sessionID int64, sourceType string, sourceRef 
 	if err != nil {
 		return LedgerEntry{}, fmt.Errorf("store: reading new ledger entry id for %s %d: %w", sourceType, sourceRef, err)
 	}
-	if err := tx.Commit(); err != nil {
-		return LedgerEntry{}, fmt.Errorf("store: committing ledger entry for %s %d: %w", sourceType, sourceRef, err)
-	}
 
 	return LedgerEntry{
 		ID:            id,
@@ -128,6 +147,72 @@ func (s *Store) RecordLedgerEntry(sessionID int64, sourceType string, sourceRef 
 		Points:        points,
 		Reason:        reason,
 	}, nil
+}
+
+// VoidLedgerEntry voids the entry recorded for (sourceType, sourceRef), taking
+// its points back out of both sides' balances, and reports whether there was
+// a non-voided entry to void.
+func (s *Store) VoidLedgerEntry(sessionID int64, sourceType string, sourceRef int64, reason string) (bool, error) {
+	res, err := s.db.Exec(
+		`UPDATE ledger_entries SET voided = TRUE, voided_at = ?, voided_reason = ?
+		 WHERE session_id = ? AND source_type = ? AND source_ref = ? AND voided = FALSE`,
+		time.Now().UnixMilli(), reason, sessionID, sourceType, sourceRef)
+	if err != nil {
+		return false, fmt.Errorf("store: voiding ledger entry for %s %d: %w", sourceType, sourceRef, err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("store: voiding ledger entry for %s %d: %w", sourceType, sourceRef, err)
+	}
+	return n > 0, nil
+}
+
+// SideBreakdown is one side's balance split by where the points came from.
+// Its fields add up to the side's GetScore balance.
+type SideBreakdown struct {
+	Starting int // the session's starting score, blue only
+	Services int // failed service checks
+	Injects  int // approved injects
+	Manual   int // manual adjustments
+}
+
+// ScoreBreakdown sums each side's non-voided ledger entries by source type.
+func (s *Store) ScoreBreakdown(sessionID int64) (blue, red SideBreakdown, err error) {
+	starting, err := sessionStartingScore(s.db, sessionID)
+	if err != nil {
+		return SideBreakdown{}, SideBreakdown{}, err
+	}
+	blue.Starting = starting
+	rows, err := s.db.Query(
+		`SELECT source_type,
+		        COALESCE(SUM((CASE WHEN to_side = ? THEN points ELSE 0 END) - (CASE WHEN from_side = ? THEN points ELSE 0 END)), 0),
+		        COALESCE(SUM((CASE WHEN to_side = ? THEN points ELSE 0 END) - (CASE WHEN from_side = ? THEN points ELSE 0 END)), 0)
+		 FROM ledger_entries WHERE session_id = ? AND voided = FALSE
+		 GROUP BY source_type`,
+		SideBlue, SideBlue, SideRed, SideRed, sessionID)
+	if err != nil {
+		return SideBreakdown{}, SideBreakdown{}, fmt.Errorf("store: breaking down the score of session %d: %w", sessionID, err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var source string
+		var b, r int
+		if err := rows.Scan(&source, &b, &r); err != nil {
+			return SideBreakdown{}, SideBreakdown{}, fmt.Errorf("store: breaking down the score of session %d: %w", sessionID, err)
+		}
+		switch source {
+		case SourceServiceCheck:
+			blue.Services, red.Services = blue.Services+b, red.Services+r
+		case SourceInject:
+			blue.Injects, red.Injects = blue.Injects+b, red.Injects+r
+		default:
+			blue.Manual, red.Manual = blue.Manual+b, red.Manual+r
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return SideBreakdown{}, SideBreakdown{}, fmt.Errorf("store: breaking down the score of session %d: %w", sessionID, err)
+	}
+	return blue, red, nil
 }
 
 // GetScore returns each side's current balance: the session's starting score
@@ -245,5 +330,5 @@ func (s *Store) AdjustScore(sessionID int64, side string, delta int, reason stri
 	if delta < 0 {
 		fromSide, toSide, nominalPoints = side, SideManual, -delta
 	}
-	return s.RecordLedgerEntry(sessionID, "manual_adjustment", ref, fromSide, toSide, nominalPoints, reason)
+	return s.RecordLedgerEntry(sessionID, SourceManualAdjustment, ref, fromSide, toSide, nominalPoints, reason)
 }

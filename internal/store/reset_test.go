@@ -18,8 +18,27 @@ func TestResetRoundData_ClearsScoreAndCheckHistoryButNothingElse(t *testing.T) {
 		t.Fatalf("SetCredentialOverride: %v", err)
 	}
 
-	if err := st.ResetRoundData(sess.ID); err != nil {
+	in := newInject(t, st, sess.ID, SideBlue)
+	if _, err := st.PutSubmission(sess.ID, Submission{InjectID: in.ID, StoredName: "sub-1", SubmittedAt: time.Now()}); err != nil {
+		t.Fatal(err)
+	}
+	in.Open, in.Grade = true, new(int)
+	if err := st.UpdateInject(sess.ID, in); err != nil {
+		t.Fatal(err)
+	}
+
+	deleted, err := st.ResetRoundData(sess.ID)
+	if err != nil {
 		t.Fatalf("ResetRoundData: %v", err)
+	}
+	if len(deleted) != 1 || deleted[0] != "sub-1" {
+		t.Errorf("deleted files = %v, want [sub-1]", deleted)
+	}
+	if _, ok, _ := st.GetSubmission(sess.ID, in.ID); ok {
+		t.Error("submission survived the reset")
+	}
+	if got, ok, _ := st.GetInject(sess.ID, in.ID); !ok || got.Open || got.Grade != nil {
+		t.Errorf("inject after reset = %+v, %v; want it kept, closed and ungraded", got, ok)
 	}
 	if overrides, err := st.CredentialOverrides(sess.ID); err != nil || len(overrides) != 0 {
 		t.Fatalf("credential overrides after reset = %v, %v; want none", overrides, err)
