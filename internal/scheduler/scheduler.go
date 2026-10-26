@@ -22,6 +22,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"slices"
 	"sync"
 	"time"
@@ -92,6 +93,10 @@ type Scheduler struct {
 	// while a round runs is taken as soon as it ends.
 	roundNow chan struct{}
 
+	// credentials, if set, supplies the blue team's credential overrides at
+	// the start of each round. Guarded by mu.
+	credentials CredentialSource
+
 	// statusMu guards lastRound, nextRound and nextRoundAt.
 	statusMu    sync.Mutex
 	lastRound   int
@@ -113,6 +118,38 @@ func New(registry *checks.Registry, sink ResultSink, configPath string, roundInt
 		opLocks:       make(map[int64]*sync.Mutex),
 		roundNow:      make(chan struct{}, 1),
 	}
+}
+
+// CredentialSource returns the credential overrides to check with, by service
+// name: a check runs with its service's override in place of the username and
+// password in its config, if it has one.
+type CredentialSource func() (map[string]checks.Credential, error)
+
+// SetCredentialSource sets where each round gets its credential overrides;
+// nil means none, every check on its config. Each round asks once, so a
+// change (or a removed override) applies from the next round on.
+func (s *Scheduler) SetCredentialSource(src CredentialSource) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.credentials = src
+}
+
+// roundCredentials asks the credential source for this round's overrides. A
+// failure is logged and the round runs on the config's credentials: checking
+// with possibly stale credentials beats not checking.
+func (s *Scheduler) roundCredentials() map[string]checks.Credential {
+	s.mu.Lock()
+	src := s.credentials
+	s.mu.Unlock()
+	if src == nil {
+		return nil
+	}
+	creds, err := src()
+	if err != nil {
+		log.Printf("scheduler: reading credential overrides, checking with the config's this round: %v", err)
+		return nil
+	}
+	return creds
 }
 
 // Run starts the round loop, numbering its first round firstRound, and
@@ -166,7 +203,7 @@ func (s *Scheduler) runRound(ctx context.Context, round int, start time.Time) bo
 	s.publishProjectedRoundStatus(start)
 	var results []checks.RoundResult
 	if len(batch) > 0 {
-		results = s.runChecks(ctxs, batch)
+		results = s.runChecks(ctxs, batch, s.roundCredentials())
 	}
 
 	s.recordMu.Lock()
@@ -222,19 +259,24 @@ func (s *Scheduler) endRound() map[int64]bool {
 }
 
 // runChecks runs every service in batch concurrently, each under its own
-// context from ctxs, and returns their results in ascending service ID order.
+// context from ctxs and with its credential override from creds if it has
+// one, and returns their results in ascending service ID order.
 // It returns once every check has: RunCheck bounds each one at the round
 // interval plus checkGrace, whatever its CheckFunc does.
-func (s *Scheduler) runChecks(ctxs map[int64]context.Context, batch map[int64]enabledService) []checks.RoundResult {
+func (s *Scheduler) runChecks(ctxs map[int64]context.Context, batch map[int64]enabledService, creds map[string]checks.Credential) []checks.RoundResult {
 	var (
 		mu      sync.Mutex
 		results = make([]checks.RoundResult, 0, len(batch))
 		wg      sync.WaitGroup
 	)
 	for id, svc := range batch {
+		params := svc.cfg.Params
+		if c, ok := creds[svc.name]; ok {
+			params, _ = checks.WithCredential(svc.cfg.CheckType, params, c)
+		}
 		wg.Go(func() {
 			start := time.Now()
-			result := RunCheck(ctxs[id], s.roundInterval, svc.fn, svc.cfg.Host, svc.cfg.Params)
+			result := RunCheck(ctxs[id], s.roundInterval, svc.fn, svc.cfg.Host, params)
 			r := checks.RoundResult{
 				ServiceID:        id,
 				PointsPerFailure: svc.cfg.PointsPerFailure,
