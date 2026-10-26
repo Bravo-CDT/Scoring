@@ -32,6 +32,7 @@ const status: Status = {
   ],
   networks: [],
   hosts: [],
+  credentials_enabled: false,
 };
 
 function jsonResponse(httpStatus: number, body: unknown): Response {

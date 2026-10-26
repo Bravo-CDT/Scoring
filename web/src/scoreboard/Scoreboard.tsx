@@ -58,9 +58,16 @@ export function Scoreboard() {
 
       <NetworkDiagram status={status} onSelectService={setHistoryOf} />
 
-      <Anchor href="/admin" c="dimmed" fz="xs" className={classes.admin}>
-        Admin
-      </Anchor>
+      <Group gap="md" className={classes.links}>
+        {status.credentials_enabled && (
+          <Anchor href="/credentials" c="dimmed" fz="xs">
+            Credentials
+          </Anchor>
+        )}
+        <Anchor href="/admin" c="dimmed" fz="xs">
+          Admin
+        </Anchor>
+      </Group>
 
       {historyOf !== null && <ServiceHistory key={historyOf} name={historyOf} onClose={() => setHistoryOf(null)} />}
     </div>

@@ -59,6 +59,8 @@ export interface Status {
   services: ServiceStatus[];
   networks: Network[];
   hosts: Host[];
+  /** Whether the blue team credentials page is on. */
+  credentials_enabled: boolean;
 }
 
 /** A non-2xx response from the API. */
@@ -178,14 +180,23 @@ export function fetchWithToken(token: string, path: string, init: RequestInit = 
  * POST /login: exchanges the admin credentials for a bearer token. Bad
  * credentials reject with an ApiError whose `detail` is the API's message.
  */
-export async function login(username: string, password: string): Promise<string> {
-  const res = await fetch('/login', {
+export function login(username: string, password: string): Promise<string> {
+  return loginAt('/login', username, password);
+}
+
+/** POST /blue/login: login, for the blue team's credentials page. */
+export function blueLogin(username: string, password: string): Promise<string> {
+  return loginAt('/blue/login', username, password);
+}
+
+async function loginAt(path: string, username: string, password: string): Promise<string> {
+  const res = await fetch(path, {
     method: 'POST',
     headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
     body: JSON.stringify({ username, password }),
   });
   if (!res.ok) {
-    throw await responseError('POST', '/login', res);
+    throw await responseError('POST', path, res);
   }
   const body = (await res.json()) as { token: string };
   return body.token;
@@ -423,4 +434,62 @@ export interface ResetRoundResponse extends Status {
  */
 export function resetRound(send: AuthedFetch, backup: boolean): Promise<ResetRoundResponse> {
   return postJSON(send, '/db/reset-round', { backup });
+}
+
+// Blue team credentials. The list is readable with either login; setting
+// takes the blue team's, resetting the admin's.
+
+/** One service whose check logs in, as GET /blue/credentials lists it (engine.CredentialEntry). */
+export interface CredentialEntry {
+  service: string;
+  host: string;
+  host_name?: string;
+  /** The user the check logs in as: the config's, or the blue team's choice. */
+  username: string;
+  /** When the blue team last changed it; absent while on the config's defaults. */
+  changed_at?: string;
+}
+
+/** The response of GET /blue/credentials (engine.Credentials). */
+export interface Credentials {
+  allowed_users: string[];
+  credentials: CredentialEntry[];
+}
+
+function credentialPath(service: string): string {
+  return `/blue/credentials/${encodeURIComponent(service)}`;
+}
+
+/** GET /blue/credentials. */
+export async function getCredentials(send: AuthedFetch): Promise<Credentials> {
+  const path = '/blue/credentials';
+  const res = await send(path, { headers: { Accept: 'application/json' } });
+  if (!res.ok) {
+    throw await responseError('GET', path, res);
+  }
+  return (await res.json()) as Credentials;
+}
+
+/** PUT /blue/credentials/{service}: the check logs in as username with password from the next round. */
+export async function setCredential(
+  send: AuthedFetch,
+  service: string,
+  username: string,
+  password: string,
+): Promise<CredentialEntry> {
+  const path = credentialPath(service);
+  const res = await send(path, {
+    method: 'PUT',
+    headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
+    body: JSON.stringify({ username, password }),
+  });
+  if (!res.ok) {
+    throw await responseError('PUT', path, res);
+  }
+  return (await res.json()) as CredentialEntry;
+}
+
+/** POST /blue/credentials/{service}/reset: back to the config's credentials. */
+export function resetCredential(send: AuthedFetch, service: string): Promise<CredentialEntry> {
+  return postJSON(send, `${credentialPath(service)}/reset`);
 }

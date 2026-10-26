@@ -31,6 +31,7 @@ const base: Status = {
   services: [],
   networks: [],
   hosts: [],
+  credentials_enabled: false,
 };
 
 describe('buildTopology', () => {
