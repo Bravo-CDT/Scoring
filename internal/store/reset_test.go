@@ -27,6 +27,15 @@ func TestResetRoundData_ClearsScoreAndCheckHistoryButNothingElse(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	h := newHunt(t, st, sess.ID, SideBlue, 40)
+	h.Open = true
+	if err := st.UpdateHunt(sess.ID, h); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.ClaimHunt(sess.ID, h.ID, SideBlue, SideManual, SideBlue, "found"); err != nil {
+		t.Fatal(err)
+	}
+
 	deleted, err := st.ResetRoundData(sess.ID)
 	if err != nil {
 		t.Fatalf("ResetRoundData: %v", err)
@@ -39,6 +48,9 @@ func TestResetRoundData_ClearsScoreAndCheckHistoryButNothingElse(t *testing.T) {
 	}
 	if got, ok, _ := st.GetInject(sess.ID, in.ID); !ok || got.Open || got.Grade != nil {
 		t.Errorf("inject after reset = %+v, %v; want it kept, closed and ungraded", got, ok)
+	}
+	if got, ok, _ := st.GetHunt(sess.ID, h.ID); !ok || got.ClaimedBy != "" || got.Open || got.Released {
+		t.Errorf("hunt after reset = %+v, %v; want it kept, unclaimed, closed and unreleased", got, ok)
 	}
 	if overrides, err := st.CredentialOverrides(sess.ID); err != nil || len(overrides) != 0 {
 		t.Fatalf("credential overrides after reset = %v, %v; want none", overrides, err)

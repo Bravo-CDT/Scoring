@@ -176,6 +176,27 @@ CREATE TABLE IF NOT EXISTS inject_submissions (
 	submitted_at INTEGER NOT NULL
 );
 
+-- Scavenger hunts: a code a team finds and submits for points. A hunt is
+-- claimed once, by the first team to submit its code; claimed_by, claimed_at
+-- and points_moved are set then, together with the hunt's ledger entry
+-- (source type "scavenger_hunt", ref = id). team is blue, red or either.
+CREATE TABLE IF NOT EXISTS hunts (
+	id           INTEGER PRIMARY KEY AUTOINCREMENT,
+	session_id   INTEGER NOT NULL REFERENCES sessions(id),
+	team         TEXT NOT NULL,
+	title        TEXT NOT NULL,
+	description  TEXT NOT NULL DEFAULT '',
+	code         TEXT NOT NULL,
+	points       INTEGER NOT NULL,
+	open         INTEGER NOT NULL DEFAULT 0,
+	released     INTEGER NOT NULL DEFAULT 0,
+	deadline     INTEGER NOT NULL,
+	created_at   INTEGER NOT NULL,
+	claimed_by   TEXT,
+	claimed_at   INTEGER,
+	points_moved INTEGER
+);
+
 -- Singleton counter backing AdjustScore's ledger source_ref, so every manual
 -- adjustment gets a distinct, monotonically increasing reference.
 CREATE TABLE IF NOT EXISTS manual_adjustment_seq (

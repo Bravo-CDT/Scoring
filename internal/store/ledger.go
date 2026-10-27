@@ -32,11 +32,12 @@ const SideManual = "manual"
 
 // Ledger source types the store itself knows about. The scorer records
 // SourceServiceCheck (it has its own copy of the name); AdjustScore records
-// SourceManualAdjustment and ApproveInject SourceInject.
+// SourceManualAdjustment and ApproveInject SourceInject, ClaimHunt SourceScavengerHunt.
 const (
 	SourceServiceCheck     = "service_check"
 	SourceManualAdjustment = "manual_adjustment"
 	SourceInject           = "inject"
+	SourceScavengerHunt    = "scavenger_hunt"
 )
 
 // LedgerEntry is one point transfer between sides. The ledger is append-only
@@ -173,7 +174,9 @@ type SideBreakdown struct {
 	Starting int // the session's starting score, blue only
 	Services int // failed service checks
 	Injects  int // approved injects
-	Manual   int // manual adjustments
+	// ScavengerHunt is points from claimed scavenger hunts.
+	ScavengerHunt int
+	Manual        int // manual adjustments
 }
 
 // ScoreBreakdown sums each side's non-voided ledger entries by source type.
@@ -205,6 +208,8 @@ func (s *Store) ScoreBreakdown(sessionID int64) (blue, red SideBreakdown, err er
 			blue.Services, red.Services = blue.Services+b, red.Services+r
 		case SourceInject:
 			blue.Injects, red.Injects = blue.Injects+b, red.Injects+r
+		case SourceScavengerHunt:
+			blue.ScavengerHunt, red.ScavengerHunt = blue.ScavengerHunt+b, red.ScavengerHunt+r
 		default:
 			blue.Manual, red.Manual = blue.Manual+b, red.Manual+r
 		}

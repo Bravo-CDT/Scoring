@@ -109,19 +109,23 @@ func TestScoreBreakdown_SumsBySource(t *testing.T) {
 	if _, err := st.ApproveInject(sess.ID, in.ID, SideManual, SideBlue, 10, 3000, "x"); err != nil {
 		t.Fatal(err)
 	}
+	h := newHunt(t, st, sess.ID, SideBlue, 40)
+	if _, err := st.ClaimHunt(sess.ID, h.ID, SideBlue, SideManual, SideBlue, "found"); err != nil {
+		t.Fatal(err)
+	}
 
 	blue, red, err := st.ScoreBreakdown(sess.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if want := (SideBreakdown{Starting: 1000, Services: -10, Injects: 3000, Manual: 5}); blue != want {
+	if want := (SideBreakdown{Starting: 1000, Services: -10, Injects: 3000, ScavengerHunt: 40, Manual: 5}); blue != want {
 		t.Errorf("blue = %+v, want %+v", blue, want)
 	}
 	if want := (SideBreakdown{Services: 10}); red != want {
 		t.Errorf("red = %+v, want %+v", red, want)
 	}
 	b, r, _ := st.GetScore(sess.ID)
-	if sum := blue.Starting + blue.Services + blue.Injects + blue.Manual; sum != b || red.Services+red.Injects+red.Manual != r {
+	if sum := blue.Starting + blue.Services + blue.Injects + blue.ScavengerHunt + blue.Manual; sum != b || red.Services+red.Injects+red.Manual != r {
 		t.Errorf("breakdown sums (%d) don't match GetScore (%d, %d)", sum, b, r)
 	}
 }
