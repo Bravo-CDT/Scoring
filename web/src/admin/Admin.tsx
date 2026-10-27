@@ -52,6 +52,7 @@ import { StateBadge } from '../scoreboard/StateBadge';
 import { useStatusPolling } from '../scoreboard/useStatusPolling';
 import { ConfirmButton } from './ConfirmButton';
 import { CredentialsSection } from './CredentialsSection';
+import { HuntsSection } from './HuntsSection';
 import { InjectsSection } from './InjectsSection';
 import { Login } from './Login';
 import { useAdminSession } from './useAdminSession';
@@ -247,6 +248,7 @@ function Console({ send, onLogout }: { send: AuthedFetch; onLogout: () => void }
             <ServiceControls services={status.services} busy={busy} perform={perform} />
             {status.credentials_enabled && <CredentialsSection send={send} />}
             {status.injects_enabled && <InjectsSection send={send} />}
+            {status.injects_enabled && <HuntsSection send={send} />}
           </>
         )}
       </Stack>
