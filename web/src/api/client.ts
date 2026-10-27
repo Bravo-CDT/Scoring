@@ -637,3 +637,60 @@ export async function deleteInject(send: AuthedFetch, id: number): Promise<void>
 export function getScoreBreakdown(): Promise<ScoreBreakdown> {
   return getJSON<ScoreBreakdown>('/score/breakdown');
 }
+
+// Scavenger hunts. A team's token sees its own team's and the "either" ones; the admin's sees all.
+
+/** A hunt as the API returns it (engine.HuntView); the code is only in the admin's view. */
+export interface HuntView {
+  id: number;
+  team: 'blue' | 'red' | 'either';
+  title: string;
+  description: string;
+  code?: string;
+  points: number;
+  open: boolean;
+  deadline: string;
+  claimable: boolean;
+  claimed_by?: 'blue' | 'red';
+  claimed_at?: string;
+  points_moved?: number;
+}
+
+/** What POST /admin/hunts takes. */
+export type HuntInput = {
+  title: string;
+  team: 'blue' | 'red' | 'either';
+  description: string;
+  code: string;
+  points: number;
+  deadline: string;
+};
+
+/** GET /team/hunts. */
+export function getHunts(send: AuthedFetch): Promise<HuntView[]> {
+  return getJSONAuthed(send, '/team/hunts');
+}
+
+/** POST /team/hunts/{id}/claim: the code is sent exactly as typed. */
+export function claimHunt(send: AuthedFetch, id: number, code: string): Promise<HuntView> {
+  return sendJSON(send, 'POST', `/team/hunts/${id}/claim`, { code });
+}
+
+/** POST /admin/hunts. */
+export function createHunt(send: AuthedFetch, hunt: HuntInput): Promise<HuntView> {
+  return sendJSON(send, 'POST', '/admin/hunts', hunt);
+}
+
+/** PUT /admin/hunts/{id}. */
+export function updateHunt(
+  send: AuthedFetch,
+  id: number,
+  hunt: Omit<HuntInput, 'team'> & { open: boolean },
+): Promise<HuntView> {
+  return sendJSON(send, 'PUT', `/admin/hunts/${id}`, hunt);
+}
+
+/** DELETE /admin/hunts/{id}. */
+export async function deleteHunt(send: AuthedFetch, id: number): Promise<void> {
+  await sendJSON(send, 'DELETE', `/admin/hunts/${id}`);
+}

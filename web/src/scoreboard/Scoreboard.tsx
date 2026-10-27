@@ -72,6 +72,11 @@ export function Scoreboard() {
             Injects
           </Anchor>
         )}
+        {status.injects_enabled && (
+          <Anchor href="/hunt" c="dimmed" fz="xs">
+            Scavenger hunt
+          </Anchor>
+        )}
         <Anchor href="/admin" c="dimmed" fz="xs">
           Admin
         </Anchor>
