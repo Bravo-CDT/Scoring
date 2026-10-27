@@ -129,17 +129,36 @@ scoring paused. **Delete** removes an inject and its files and takes back
 any points it moved.
 
 Clicking a team's score on the scoreboard shows where its points came from:
-services, injects, manual adjustments, and the scavenger hunt (always 0 for
-now). Points per inject show only on the team's own injects page.
+services, injects, manual adjustments, and the scavenger hunt. Points per inject show only on the team's own injects
+page.
 
 Submissions and PDFs are kept in an `uploads/` directory next to the
 database. Backups don't include it, so copy it along with a backup if you
 need the files. "Reset for a new round" keeps the injects but closes them and
-clears every submission and grade; with its backup on, the submission files
-move into a `-uploads` directory beside the backup (e.g.
+clears every submission and grade, and closes every scavenger hunt and clears
+its claim; with its
+backup on, the submission files move into a `-uploads` directory beside the backup (e.g.
 `backups/scoring-<timestamp>-uploads/`) instead of being deleted. To restore
 that backup, move them back into `uploads/` too. Like the blue team's, the red team login
 is read at startup only.
+
+### Scavenger hunt
+
+A scavenger hunt is a code hidden somewhere for a team to find. Teams see
+their hunts on the same `/injects` page after logging in, and enter the code
+to claim the points.
+
+In the admin console's Scavenger hunt section, an admin creates a hunt for
+blue, red, or either team, with a title, a description, the code, a point
+value and a deadline. A new hunt starts closed; **Open** lets teams claim it,
+until the deadline or until it's closed again. Teams never see the code.
+It's matched exactly, including case and spaces.
+
+The first correct claim wins and the hunt is done. A blue claim adds the
+points to blue; a red claim moves them from blue to red, up to what blue has.
+Five wrong codes in a row lock that team out of claiming for a minute; the
+count is kept in memory, so a restart clears it. **Delete** removes a hunt
+and takes back any points it moved.
 
 Everything the console does is also a plain HTTP API: `POST /login` with
 `{"username","password"}` returns a token, sent as
@@ -219,8 +238,8 @@ database file (e.g. `backups/scoring-20261022T190000.123Z.db` next to
 
 "Reset for a new round" clears scores and history for the current session,
 puts blue team credential changes back to the config's defaults, clears
-inject submissions and grades (keeping the injects), and restarts round
-numbering at 1.
+inject submissions and grades and scavenger hunt claims (keeping the injects
+and hunts), and restarts round numbering at 1.
 
 There is no restore button; restoring one is a manual, three-step process:
 
