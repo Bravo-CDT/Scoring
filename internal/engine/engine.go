@@ -94,6 +94,10 @@ const (
 	EventInjectSubmitted       = "inject_submitted"
 	EventInjectApproved        = "inject_approved"
 	EventInjectDeleted         = "inject_deleted"
+	EventHuntCreated           = "hunt_created"
+	EventHuntUpdated           = "hunt_updated"
+	EventHuntClaimed           = "hunt_claimed"
+	EventHuntDeleted           = "hunt_deleted"
 )
 
 // StartFailure reports one service whose routine failed to start, for the
@@ -203,6 +207,12 @@ type Engine struct {
 	// write. It is separate from mu so a submission never waits behind a
 	// control operation; ResetRound takes it after mu.
 	injectMu sync.Mutex
+	// huntMu is injectMu for hunts: it makes a claim's checks and its write
+	// one step. ResetRound takes it after mu, with injectMu.
+	huntMu sync.Mutex
+	// claims counts each team's wrong codes. It is in memory, so a restart
+	// clears the cooldowns.
+	claims *claimLimiter
 	// uploadsDir is where submissions and inject PDFs are kept.
 	uploadsDir string
 }
@@ -275,6 +285,7 @@ func New(st *store.Store, sess store.Session, sched *scheduler.Scheduler, config
 		scheduler:      sched,
 		configPath:     configPath,
 		desiredEnabled: make(map[int64]bool),
+		claims:         newClaimLimiter(time.Now),
 	}
 }
 
@@ -739,7 +750,9 @@ func (e *Engine) ResetRound(backup bool) (string, error) {
 	}
 
 	e.injectMu.Lock()
+	e.huntMu.Lock()
 	deleted, err := e.store.ResetRoundData(e.session.ID)
+	e.huntMu.Unlock()
 	e.injectMu.Unlock()
 	if err != nil {
 		return path, fmt.Errorf("engine: resetting round data: %w", err)

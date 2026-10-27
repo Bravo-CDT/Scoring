@@ -419,7 +419,8 @@ func (e *Engine) ScoreBreakdown() (ScoreBreakdown, error) {
 	team := func(s store.SideBreakdown) TeamBreakdown {
 		return TeamBreakdown{
 			Starting: s.Starting, Services: s.Services, Injects: s.Injects, Manual: s.Manual,
-			Total: s.Starting + s.Services + s.Injects + s.Manual,
+			ScavengerHunt: s.ScavengerHunt,
+			Total:         s.Starting + s.Services + s.Injects + s.Manual + s.ScavengerHunt,
 		}
 	}
 	return ScoreBreakdown{Blue: team(blue), Red: team(red)}, nil
