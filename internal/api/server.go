@@ -121,6 +121,7 @@ func newServer(e *engine.Engine, st *store.Store, sessionID int64, a *auth.Auth,
 
 	s.routeBlueTeam()
 	s.routeInjects(a)
+	s.routeHunts(a)
 
 	return s
 }
