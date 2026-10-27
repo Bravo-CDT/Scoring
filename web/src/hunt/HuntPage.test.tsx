@@ -1,4 +1,4 @@
-import { screen, within } from '@testing-library/react';
+import { act, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { HuntView } from '../api/client';
@@ -68,5 +68,24 @@ describe('HuntPage', () => {
     await screen.findByRole('group', { name: 'Taken' });
     expect(within(screen.getByLabelText('Hunt')).getAllByRole('option')).toHaveLength(2);
     expect(screen.getByRole('group', { name: 'Find the flag' })).toBeInTheDocument();
+  });
+
+  it('disables Submit once a poll shows the picked hunt claimed', async () => {
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
+    const hunts = [hunt];
+    stubApi(hunts);
+    const user = userEvent.setup();
+    render(<HuntPage />);
+
+    await screen.findByRole('group', { name: 'Find the flag' });
+    await user.selectOptions(screen.getByLabelText('Hunt'), '1');
+    await user.type(screen.getByLabelText('Code'), 'abc');
+    expect(screen.getByRole('button', { name: 'Submit' })).toBeEnabled();
+
+    hunts[0] = { ...hunt, claimable: false, claimed_by: 'red' };
+    await act(() => vi.advanceTimersByTimeAsync(15_000));
+
+    expect(screen.getByRole('button', { name: 'Submit' })).toBeDisabled();
+    vi.useRealTimers();
   });
 });

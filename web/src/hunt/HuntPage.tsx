@@ -86,14 +86,16 @@ function ClaimForm({
   const [saving, setSaving] = useState(false);
   const [outcome, setOutcome] = useState<{ ok: boolean; message: string } | null>(null);
   const claimable = hunts.filter((h) => h.claimable);
+  // A poll can drop the picked hunt (claimed by the other team, closed); then nothing is picked.
+  const value = claimable.some((h) => String(h.id) === selected) ? selected : '';
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (!selected || code === '') return;
+    if (!value || code === '') return;
     setSaving(true);
     setOutcome(null);
     try {
-      onClaimed(await claimHunt(send, Number(selected), code));
+      onClaimed(await claimHunt(send, Number(value), code));
       setSelected('');
       setCode('');
       setOutcome({ ok: true, message: 'Claimed' });
@@ -109,13 +111,13 @@ function ClaimForm({
       <Stack gap="xs">
         <NativeSelect
           label="Hunt"
-          value={selected}
+          value={value}
           onChange={(e) => setSelected(e.currentTarget.value)}
           data={[{ value: '', label: 'Pick a hunt' }, ...claimable.map((h) => ({ value: String(h.id), label: h.title }))]}
         />
         <TextInput label="Code" value={code} onChange={(e) => setCode(e.currentTarget.value)} />
         <Group>
-          <Button type="submit" loading={saving} disabled={!selected || code === ''}>
+          <Button type="submit" loading={saving} disabled={!value || code === ''}>
             Submit
           </Button>
         </Group>
