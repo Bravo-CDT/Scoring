@@ -133,6 +133,10 @@ func (e *Engine) UpdateHunt(id int64, in HuntInput, open bool) (HuntView, error)
 // hunt: its points move to blue for a blue claim, from blue to red for a red
 // one. Five wrong codes in a row lock the team out for a minute.
 func (e *Engine) ClaimHunt(team string, id int64, code string) (HuntView, error) {
+	// "" would be read as the admin, who has no side to pay out to.
+	if team != TeamBlue && team != TeamRed {
+		return HuntView{}, ErrHuntNotFound
+	}
 	if _, err := e.getHunt(team, id); err != nil {
 		return HuntView{}, err
 	}
@@ -150,6 +154,11 @@ func (e *Engine) ClaimHunt(team string, id int64, code string) (HuntView, error)
 	}
 	if !claimable(h, time.Now()) {
 		return HuntView{}, ErrHuntClosed
+	}
+	// Claims that queued on huntMu all passed the check above before any
+	// of them was counted, so look again.
+	if left := e.claims.wait(team); left > 0 {
+		return HuntView{}, &CooldownError{RetryAfter: left}
 	}
 	if subtle.ConstantTimeCompare([]byte(code), []byte(h.Code)) != 1 {
 		e.claims.fail(team)

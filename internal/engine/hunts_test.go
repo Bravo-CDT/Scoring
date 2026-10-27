@@ -118,6 +118,7 @@ func TestClaimHunt_Refusals(t *testing.T) {
 		{"closed", TeamBlue, closed.ID, "Code", ErrHuntClosed},
 		{"past deadline", TeamBlue, late.ID, "Code", ErrHuntClosed},
 		{"other team's", TeamBlue, redOnly.ID, "Code", ErrHuntNotFound},
+		{"no team", "", open.ID, "Code", ErrHuntNotFound},
 		{"missing", TeamBlue, 9999, "Code", ErrHuntNotFound},
 		{"claimed", TeamBlue, taken.ID, "Code", ErrHuntClaimed},
 	} {
@@ -275,5 +276,32 @@ func TestCreateHunt_Invalid(t *testing.T) {
 				t.Errorf("err = %v, want ErrInvalidHunt", err)
 			}
 		})
+	}
+}
+
+func TestClaimHunt_ParallelWrongCodesHitCooldown(t *testing.T) {
+	h := newHuntsHarness(t)
+	hu := h.openHunt(t, TeamEither, "abc", 100)
+	errs := make([]error, 10)
+	var wg sync.WaitGroup
+	for i := range errs {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_, errs[i] = h.e.ClaimHunt(TeamBlue, hu.ID, "bad")
+		}()
+	}
+	wg.Wait()
+	wrong := 0
+	for _, err := range errs {
+		switch {
+		case errors.Is(err, ErrWrongCode):
+			wrong++
+		case !errors.Is(err, ErrCooldown):
+			t.Errorf("err = %v, want ErrWrongCode or ErrCooldown", err)
+		}
+	}
+	if wrong > 5 {
+		t.Errorf("%d wrong codes were checked, want at most 5", wrong)
 	}
 }
